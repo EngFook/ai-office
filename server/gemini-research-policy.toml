@@ -1,0 +1,11 @@
+# AI Office research desk: Gemini may search and read, never change files or run commands.
+# The office runner itself saves Gemini's final answer under reports/research/.
+[[rule]]
+toolName = ["google_web_search", "web_fetch", "read_file", "list_directory", "glob", "grep_search", "read_many_files"]
+decision = "allow"
+priority = 900
+
+[[rule]]
+toolName = ["write_file", "replace", "edit", "run_shell_command", "save_memory", "ask_user"]
+decision = "deny"
+priority = 999

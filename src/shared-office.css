@@ -1,0 +1,113 @@
+.shared-office .content{max-width:1700px;padding-top:28px}
+.shared-office .page-heading{margin-bottom:22px}
+.shared-office .panel-heading{height:auto;min-height:98px;padding:19px 24px}
+.shared-office .scene-wrap{height:clamp(450px,53vw,670px)}
+.shared-office .scene-hint{font-size:8px}
+.shared-room-nav{display:grid;gap:7px}
+.shared-room-nav button{display:flex;align-items:center;gap:9px;border:0;background:transparent;border-radius:6px;padding:12px 10px;text-align:left;font-size:11px;color:#a9b7c8}
+.shared-room-nav button:hover{background:#1a2635;color:#e8eef2}
+.shared-room-nav button i{width:6px;height:6px;border-radius:50%;flex:none}
+.shared-room-nav button span{flex:1}
+.shared-overview{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}
+.shared-roles{border:1px solid #293746;border-radius:8px;background:#101827;padding:22px}
+.shared-roles h3{font:600 16px 'Manrope',sans-serif;margin:8px 0 17px}
+.shared-roles>div{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.shared-roles button{display:flex;flex-direction:column;gap:10px;text-align:left;border:1px solid #304238;border-radius:6px;background:#182b28;padding:12px;color:#bfe6d4;font-size:11px}
+.shared-roles button:hover{background:#233b34}
+.shared-roles button strong{font-size:20px;font-weight:500}
+.shared-roles p{margin-top:15px;font-size:11px;line-height:1.6;color:#899aac}
+.shared-room-cards{display:grid;grid-template-columns:1.45fr 1fr 1fr;gap:14px;margin-top:18px}
+.shared-room-cards>button{display:flex;flex-direction:column;align-items:flex-start;border:1px solid #293746;border-radius:8px;background:#101827;padding:21px;text-align:left}
+.shared-room-cards>button:hover{border-color:#55786c}
+.shared-room-cards strong{font-size:15px;margin:12px 0 8px}
+.shared-room-cards p{font-size:11px;line-height:1.7;color:#91a1b2;margin-bottom:18px}
+.shared-room-visit{margin-top:auto;display:flex;align-items:center;gap:9px;color:#b4ddca;font-size:11px}
+.shared-empty-floor{position:absolute;left:16px;right:16px;bottom:19px;text-align:center;color:#c4d1dd;font-size:11px;pointer-events:none;text-shadow:0 2px 4px #000}
+.shared-office .office-explorer:fullscreen .scene-wrap{height:auto;min-height:0;flex:1}
+.shared-office .agent-dialog .agent-actions{margin-top:23px}
+@media(max-width:1100px){.shared-overview{grid-template-columns:1fr}.shared-room-cards{grid-template-columns:repeat(3,1fr)}.shared-office .content{padding-left:22px;padding-right:22px}.shared-roles>div{grid-template-columns:repeat(4,1fr)}}
+@media(max-width:680px){.shared-office .scene-wrap{height:460px}.shared-office .content{padding:24px 12px}.shared-office .panel-heading{padding:16px}.shared-office .panel-heading h2{font-size:16px}.shared-office .panel-heading p{font-size:10px;max-width:230px}.shared-office .scene-top-label{font-size:7px}.shared-room-nav{display:none}.shared-room-cards{grid-template-columns:1fr}.shared-room-cards>button{padding:17px}.shared-overview{gap:12px}.shared-roles{padding:17px}.shared-roles>div{grid-template-columns:repeat(2,1fr)}}
+
+/* A calm frame for the open-plan walnut office. */
+.shared-office .office-panel {
+  background: #211c19;
+  border-color: #4b3d2e;
+  border-radius: 14px;
+  box-shadow: 0 18px 46px #0002;
+}
+.shared-office .office-panel .panel-heading { padding: 23px 24px; }
+.shared-office .office-panel .panel-heading h2 { color: #f1e7d8; }
+.shared-office .office-panel .panel-heading p { color: #baad9c; }
+.shared-office .office-panel .panel-heading .section-kicker { color: #cbb38e; }
+.shared-office .scene-actions .icon-button {
+  width: 38px;
+  height: 38px;
+  border-color: #5d4b35;
+  border-radius: 8px;
+  color: #d5bd96;
+  background: #2a231c;
+}
+.shared-office .scene-actions .icon-button:hover { background: #3a2e21; border-color: #bda075; }
+.shared-office .scene-actions .icon-button:focus-visible { outline-color: #f3d8a3; }
+.shared-office .scene-wrap {
+  height: clamp(480px, 54vw, 720px);
+  border-color: #493b2b;
+  background: #1c1815;
+}
+.shared-office .scene-top-label,
+.shared-office .scene-hint {
+  top: 18px;
+  background: #211b16eb;
+  border-color: #b3915e33;
+  border-radius: 7px;
+  color: #cdbb9f;
+  backdrop-filter: none;
+}
+.shared-office .scene-top-label { left: 18px; padding: 8px 11px; letter-spacing: .9px; }
+.shared-office .scene-top-label span { color: #d7b478; }
+.shared-office .scene-top-label i { background: #826d4f; }
+.shared-office .scene-hint { right: 18px; padding: 8px 11px; color: #b7a58d; }
+.shared-office .shared-empty-floor {
+  left: 50%;
+  right: auto;
+  bottom: 18px;
+  width: max-content;
+  max-width: calc(100% - 32px);
+  padding: 9px 14px;
+  border: 1px solid #b3915e33;
+  border-radius: 8px;
+  background: #241d17ed;
+  color: #d9c5a7;
+  line-height: 1.6;
+  text-shadow: none;
+  transform: translateX(-50%);
+}
+@media (max-width: 680px) {
+  .shared-office .office-panel { border-radius: 11px; }
+  .shared-office .office-panel .panel-heading { padding: 18px 14px; align-items: flex-start; gap: 12px; }
+  .shared-office .office-panel .panel-heading p { max-width: 205px; line-height: 1.7; }
+  .shared-office .scene-actions { flex-wrap: wrap; justify-content: flex-end; max-width: 96px; gap: 5px; }
+  .shared-office .scene-actions .icon-button { width: 44px; height: 44px; }
+  .shared-office .scene-wrap { height: clamp(440px, 64svh, 580px); }
+  .shared-office .scene-top-label { top: 12px; left: 12px; font-size: 8px; padding: 7px 9px; letter-spacing: .5px; }
+  .shared-office .shared-empty-floor { bottom: 12px; font-size: 10px; padding: 8px 11px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .shared-office .scene-sign { transition: none; }
+}
+
+/* Approved 2D redesign: compact frame and a shared detail drawer. */
+.shared-office .topbar{min-height:70px;height:auto;padding:12px 28px;gap:18px}
+.header-context{display:grid;gap:7px;min-width:0}.header-activity{font-size:11px;color:#b2c9bc;line-height:1.5}.shared-office .top-actions{gap:12px}.environment-date{font-size:10px;white-space:nowrap;color:#9fa99d}.environment-date>span{color:#b8ccb8}.shared-office .content{padding-top:16px}.office-page-actions{display:flex;justify-content:flex-end;margin-bottom:12px}.shared-office .shared-room-cards{grid-template-columns:repeat(4,minmax(0,1fr))}.shared-office .shared-room-nav button{padding:11px 8px;line-height:1.6}.shared-office .shared-room-nav button span{overflow-wrap:anywhere}.shared-office .workspace-label{line-height:1.6;letter-spacing:.8px}
+.detail-drawer{position:fixed;right:0;top:0;bottom:0;width:min(480px,100vw);max-height:100dvh;border-radius:14px 0 0 14px;padding:32px 26px;overscroll-behavior:contain}.detail-drawer .close-button{min-width:36px;min-height:36px;right:14px;top:14px}.drawer-section{border-top:1px solid #435044;padding:18px 0}.drawer-section h3{font-size:12px;font-weight:700;margin:0 0 12px;color:#d8e6dc}.drawer-section p{font-size:12px;color:#aabcb0;line-height:1.7;overflow-wrap:anywhere}.drawer-section .agent-status{margin:0 0 12px}.permission-badge{display:inline-flex;border:1px solid #6e806c;border-radius:999px;padding:7px 11px;font-size:11px;color:#d0e2c7;background:#29382a}.drawer-primary{width:100%;margin-top:12px;min-height:44px}.detail-drawer .drawer-room{display:block;padding:0;background:none;border:0}.detail-drawer h2{padding-right:20px}.detail-drawer .claude-agent-activity{margin-top:12px}.detail-drawer .claude-worker{overflow-wrap:anywhere}.detail-drawer .shared-agent-facts{grid-template-columns:1fr}.detail-drawer .shared-agent-facts strong{font-size:11px}
+@media(max-width:1100px){.shared-office .shared-room-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.shared-office .topbar{padding:12px 20px}.environment-date{display:none}}
+@media(max-width:760px){.shared-office .sidebar{position:fixed;inset:auto 0 0;width:100%;height:auto;padding:6px 6px calc(6px + env(safe-area-inset-bottom));border:0;border-top:1px solid #374132;background:#111b19fa;z-index:50}.shared-office .sidebar :is(.brand,.workspace-label,.side-divider,.shared-room-nav,.sidebar-bottom){display:none}.shared-office .main-nav{display:flex;gap:2px}.shared-office .main-nav button{display:flex;flex:1;flex-direction:column;justify-content:center;gap:4px;min-height:52px;height:auto;padding:6px 2px;width:20%;font-size:10px}.shared-office .main-nav button svg{width:18px;height:18px}.shared-office .nav-count{display:none}.shared-office .main{margin:0;width:100%;padding-bottom:76px}.shared-office .app-shell{display:block}.shared-office .topbar{padding:11px 12px;gap:8px;align-items:flex-start}.header-context{gap:5px}.shared-office .breadcrumbs{font-size:10px;gap:5px}.shared-office .breadcrumbs>span,.shared-office .breadcrumbs>svg{display:none}.header-activity{font-size:10px;max-width:260px}.shared-office .top-actions{gap:7px}.shared-office .lang-toggle{margin:0;padding:0 8px;min-width:32px;min-height:36px}.shared-office .content{padding:14px 10px 20px}.shared-office .shared-room-cards{grid-template-columns:1fr}.detail-drawer{top:auto;left:0;right:0;bottom:0;max-height:88dvh;width:100%;border-radius:18px 18px 0 0;padding:30px 20px calc(24px + env(safe-area-inset-bottom));box-shadow:0 -20px 70px #0008}.detail-drawer::before{content:'';position:absolute;top:9px;left:calc(50% - 20px);width:40px;height:4px;border-radius:2px;background:#8c9b8c}.shared-office .scene-wrap{height:clamp(400px,62svh,600px)}.shared-office footer{padding-bottom:14px}.shared-office .item-card{gap:10px}.shared-office .item-pill{display:none}}
+@media(prefers-reduced-motion:reduce){.shared-office *, .detail-drawer *{scroll-behavior:auto;transition:none}}
+
+/* Five compact provider hosts remain selectable even when there are no jobs. */
+.resident-label{display:flex;align-items:center;gap:6px;padding:5px 8px;border:1px solid #d6dfd9;border-radius:9px;background:rgba(255,255,252,.96);box-shadow:0 2px 8px #1d292518;color:#35443b;font-family:inherit;font-size:11px;line-height:1.3;white-space:nowrap;cursor:pointer}
+.resident-label strong{font-size:11px;font-weight:650}
+.resident-label>span:last-child{font-size:10px;color:#617168}
+.resident-label:hover,.resident-label:focus-visible{outline:2px solid #3b7159;outline-offset:2px}
+.resident-dot{width:6px;height:6px;flex:none;border-radius:50%;background:#a4adab}
+.resident-dot--working{background:#21865a;box-shadow:0 0 0 2px #21865a18}

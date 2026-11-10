@@ -3,8 +3,8 @@ import './building-stack.css'
 
 const FLOORS = [
   { number: 3, name: 'Grok', detail: 'Strategy & exploration', accent: '#b8a6f3' },
-  { number: 2, name: 'Claude Code', detail: 'Research & analysis', accent: '#e5ac88' },
-  { number: 1, name: 'GPT Codex', detail: 'Engineering & execution', accent: '#9ad8b9' },
+  { number: 2, name: 'Claude Code', detail: 'Game development & live agents', accent: '#e5ac88' },
+  { number: 1, name: 'Codex', detail: 'Engineering, design & delivery', accent: '#9ad8b9' },
 ]
 
 // An illustrated cutaway keeps every storey visible while the buttons remain
@@ -36,14 +36,14 @@ function StoreyIllustration({ number }) {
 }
 
 export default function BuildingStack({ floor, onSelectFloor }) {
-  return <section className="building-stack" aria-label="Office building floor selector">
+  return <section className="building-stack" aria-label="Studio building selector">
     <div className="building-stack__heading">
-      <div><span className="building-stack__eyebrow">THE BUILDING</span><h2>Choose a floor</h2></div>
-      <span className="building-stack__count">03 FLOORS</span>
+      <div><span className="building-stack__eyebrow">THE BUILDING</span><h2>Choose a studio</h2></div>
+      <span className="building-stack__count">STUDIO</span>
     </div>
     <p className="building-stack__description">Select a level to visit its team.</p>
     <div className="building-stack__drawing">
-      <div className="building-stack__roof" aria-hidden="true"><span>AI OFFICE</span></div>
+      <div className="building-stack__roof" aria-hidden="true"><span>STUDIO</span></div>
       <div className="building-stack__levels">
         {FLOORS.map(({ number, name, detail, accent }) => <button
           type="button"

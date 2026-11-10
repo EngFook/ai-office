@@ -1,0 +1,27 @@
+/* Scene-only chrome: cool glass labels echo the glazing and leave the warm oak readable. */
+.shared-office .scene-wrap { background:#091522; border-color:#324455; }
+.shared-office .scene-wrap .shared-office-sign {
+  padding:6px 9px; min-height:30px; border-radius:7px;
+  background:#101e2bec; border-color:#7393a259; color:#e3eff2;
+  box-shadow:0 4px 12px #020b164d; letter-spacing:.015em;
+}
+.shared-office .scene-wrap .shared-office-sign small { color:#adc2cd; margin-top:3px; }
+.shared-office .scene-wrap .shared-office-sign.scene-sign--selected {
+  background:#193b48; border-color:#81d5d8; box-shadow:0 0 0 2px #81d5d826;
+}
+.shared-office .scene-wrap .shared-office-sign.scene-sign--selected small { color:#b9e7e7; }
+.shared-office .scene-wrap .scene-sign[data-interactive=true].shared-office-sign:hover {
+  background:#234455; color:#fff; border-color:#86cadc;
+}
+.shared-office .scene-wrap .resident-label {
+  background:#102534f5; border-color:#7393a2a3; color:#e2eff2;
+  box-shadow:0 3px 12px #020b164d;
+}
+.shared-office .scene-wrap .resident-label>span:last-child { color:#b7cbd3; }
+.shared-office .scene-wrap .scene-hint,
+.shared-office .scene-wrap .shared-empty-floor { background:#10212de8; color:#b4cbd5; border-color:#7393a24d; }
+.shared-office .scene-wrap :is(.shared-office-sign,.resident-label):focus-visible { outline:2px solid #9ee6e9; outline-offset:3px; }
+@media (pointer:coarse) {
+  .shared-office .scene-wrap .shared-office-sign[data-interactive=true] { min-height:44px; }
+  .shared-office .scene-wrap .resident-label { min-height:44px; }
+}

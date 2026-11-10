@@ -1,0 +1,6 @@
+---
+description: Grok Bot 聊天只由用户控制；所有 AI 仅通过办公室接口通信
+alwaysApply: true
+---
+
+遵守项目 AGENTS.md 中的 Grok Bot 通信规则。所有 AI 和委派脚本不得通过用户账号、本机 Grok Bot 应用、浏览器或 UI 自动化向 Grok Bot 聊天输入、粘贴或发送消息，包括进度同步、配置和测试。只使用办公室 pending-questions 队列及已配置的 webhook 唤醒；不可用时报告受阻，不回退到聊天。Grok Bot 转告必须使用自己的 Bot 身份，不能冒充用户。

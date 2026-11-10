@@ -4,3 +4,17 @@ dist/
 .env
 .env.*
 !.env.example
+
+# Local observation feed consumed by Grok; runtime data, not source.
+reports/qwen-watch.json
+
+reports/qwen-work-reports.json
+
+# Private runtime evidence and local worktrees never enter public snapshots.
+reports/
+.worktrees/
+*.orig
+*.bak*
+*.sqlite*
+*.db
+*screenshot*

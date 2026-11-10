@@ -9,3 +9,141 @@
 @media(max-width:680px){.office-toolbar{flex-wrap:wrap;gap:9px}.room-picker{flex-basis:100%}.room-picker>span{display:block}.room-picker select{max-width:none}.find-agent-button{margin-left:auto}.find-agent-button span{display:inline}.room-details__actions{gap:6px}.room-details__actions button{font-size:9px;padding:8px}.room-details__actions .room-back{padding-left:0}.directory-badge{font-size:8px}.scene-hint{display:none}.scene-top-label{max-width:calc(100% - 28px)}.department-actions{gap:10px}}
 
 .overlay{z-index:100}
+.agent-beacon--runtime{border-color:#f0bc99;background:#fff0df}.agent-beacon--runtime i{background:#b87852;box-shadow:0 0 0 3px #b8785225}
+.agent-marker{display:flex;align-items:center;justify-content:center;gap:7px;width:80px;height:23px;padding:3px 7px;border:1px solid #658c77;border-radius:12px;background:#17392cf2;color:#eaffef;box-shadow:0 2px 6px #142d2838;font:600 10px monospace;white-space:nowrap;cursor:pointer}.agent-marker>i{width:6px;height:6px;flex:none;border-radius:50%;background:#9ce5b4}.agent-marker>code{font:inherit;letter-spacing:.25px}.agent-marker.is-idle{border-color:#6f89a9;background:#26394df2;color:#e7f0fd}.agent-marker.is-idle>i{background:#afc8e8}.agent-marker.is-waiting{border-color:#ad8851;background:#4c3822f2;color:#fff0d6}.agent-marker.is-waiting>i{background:#f3c47f}.agent-marker.is-offline{border-color:#6c7785;background:#303842f2;color:#d9e0e9}.agent-marker.is-offline>i{background:#98a4b4}.agent-marker:hover,.agent-marker:focus-visible{border-color:#efffec;box-shadow:0 0 0 2px #e6fce82b;outline:none}.agent-marker.is-selected{border-color:#f7e2aa;box-shadow:0 0 0 2px #f7e2aa38}.scene-label--leader:has(.agent-marker)::before{display:none}
+.shared-office-sign{text-align:center;border-color:#c2bbac;background:#fbf6eaf2;color:#3d5249;font-size:10px;letter-spacing:.02em}.shared-office-sign small{display:block;margin:4px 0 0;font-size:8px;font-weight:500;letter-spacing:0;color:#67766a}.shared-office-sign.scene-sign--selected{background:#29483a;color:#f3ffef}.shared-office-sign.scene-sign--selected small{color:#c5ddc7}.shared-hub-actions{display:flex;gap:7px}.shared-hub-actions button{padding:7px 10px;border:1px solid #668679;border-radius:5px;background:#244638;color:#eff7e9;font:600 10px 'DM Sans',sans-serif;cursor:pointer}.agent-marker.provider-claude{border-color:#ba8c70;background:#4b382ef2;color:#ffeadb}.agent-marker.provider-codex{border-color:#769c85;background:#17392cf2;color:#eaffef}.agent-marker.provider-grok{border-color:#9e89bf;background:#3d324df2;color:#f3eaff}.agent-marker[data-provider]>i{background:var(--provider-color)}
+
+/* Walnut, linen and brass carry the quieter office into its controls. */
+.shared-office .office-toolbar {
+  gap: 14px;
+  padding: 14px 20px;
+  background: #211c19;
+  border-color: #44372a;
+}
+.shared-office .room-picker { color: #d6bc91; }
+.shared-office .room-picker select {
+  min-height: 40px;
+  background: #171411;
+  border-color: #5a4833;
+  border-radius: 8px;
+  color: #eee3d0;
+  color-scheme: dark;
+}
+.shared-office .room-picker optgroup { color: #d6bc91; }
+.shared-office .camera-modes {
+  border-color: #50402f;
+  border-radius: 9px;
+  background: #191512;
+}
+.shared-office .camera-modes button {
+  min-height: 34px;
+  padding: 7px 11px;
+  border-radius: 6px;
+  color: #beaf9c;
+}
+.shared-office .camera-modes button[aria-pressed=true] {
+  background: #cdb085;
+  color: #2c2118;
+  box-shadow: 0 2px 7px #0003;
+}
+.shared-office .find-agent-button {
+  min-height: 40px;
+  color: #dac5a4;
+}
+.shared-office .room-details {
+  gap: 20px;
+  padding: 21px 22px;
+  border-color: #403429;
+  background: linear-gradient(115deg, #26201b, #1c1917);
+}
+.shared-office .room-details__icon {
+  width: 42px;
+  height: 42px;
+  border-color: #6a5135;
+  background: #3b2f22;
+  color: #dfbd84;
+  border-radius: 10px;
+}
+.shared-office .room-details__eyebrow { color: #bda37e; }
+.shared-office .room-details h3 { color: #f2e8d8; }
+.shared-office .room-details p { color: #bdaf9e; line-height: 1.75; }
+.shared-office .room-details__actions button {
+  min-height: 38px;
+  border-color: #584732;
+  border-radius: 7px;
+  background: #2b241e;
+  color: #e1cdb0;
+}
+.shared-office .room-details__actions button:hover { background: #3a2e20; border-color: #b99a66; }
+.shared-office .room-details__actions .room-primary { background: #cdb085; border-color: #cdb085; color: #2c2118; }
+.shared-office .room-details__actions .room-primary:hover { background: #dfc49a; }
+.shared-office .room-details__actions .room-back { background: transparent; border-color: transparent; color: #bda88b; }
+.shared-office-sign {
+  min-height: 32px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border-color: #a082526b;
+  background: #231d18f5;
+  color: #f0e1c8;
+  font-size: 10px;
+  line-height: 1.35;
+  letter-spacing: .02em;
+  box-shadow: 0 3px 10px #0004;
+}
+.shared-office-sign small { color: #c8b18c; margin-top: 3px; line-height: 1.3; }
+.shared-office-sign.scene-sign--selected { background: #453321; color: #fff0d3; border-color: #d5b071; box-shadow: 0 0 0 2px #d5b07126; }
+.shared-office-sign.scene-sign--selected small { color: #e8c999; }
+.scene-sign[data-interactive=true].shared-office-sign:hover { background: #392b1e; color: #ffeac3; box-shadow: 0 4px 12px #0005; }
+.agent-marker {
+  width: auto;
+  min-width: 86px;
+  height: 30px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  box-shadow: 0 3px 8px #0005;
+  font-weight: 700;
+  font-size: 11px;
+  touch-action: manipulation;
+}
+.agent-marker.is-selected { border-color: #f3d8a3; box-shadow: 0 0 0 3px #f3d8a333, 0 3px 8px #0005; }
+.shared-hub-actions { gap: 8px; }
+.shared-hub-actions button {
+  min-height: 36px;
+  padding: 8px 12px;
+  background: #35291c;
+  border-color: #b18d58;
+  border-radius: 7px;
+  color: #f3e1c1;
+  box-shadow: 0 3px 9px #0004;
+}
+.shared-hub-actions button:hover { background: #4c3925; }
+.shared-office .office-explorer:fullscreen { background: #171411; }
+.shared-office .office-toolbar :is(button,select):focus-visible,
+.shared-office .room-details button:focus-visible,
+.shared-office-sign:focus-visible,
+.shared-hub-actions button:focus-visible,
+.agent-marker:focus-visible { outline: 2px solid #f3d8a3; outline-offset: 3px; }
+@media (max-width: 1250px) {
+  .shared-office .office-toolbar { gap: 10px; padding: 12px 14px; }
+  .shared-office .camera-modes button { padding: 7px 8px; }
+  .shared-office .room-details { padding: 18px; }
+}
+@media (max-width: 680px) {
+  .shared-office .office-toolbar { gap: 10px; padding: 12px; }
+  .shared-office .room-picker select { min-height: 44px; font-size: 16px; }
+  .shared-office .camera-modes button { min-height: 38px; padding: 8px 9px; font-size: 11px; }
+  .shared-office .find-agent-button { min-height: 44px; padding: 9px 5px; font-size: 11px; }
+  .shared-office .room-details { padding: 18px 14px; gap: 15px; }
+  .shared-office .room-details__actions { gap: 8px; }
+  .shared-office .room-details__actions button { min-height: 44px; padding: 10px 12px; font-size: 11px; }
+  .shared-office .room-details p { font-size: 11px; }
+}
+@media (pointer: coarse) {
+  .agent-marker { min-height: 44px; padding: 8px 12px; }
+  .shared-office-sign[data-interactive=true], .shared-hub-actions button { min-height: 44px; }
+  .scene-sign[data-interactive=true].shared-office-sign:hover { transform: none; }
+}
+
+/* The primary controls form one capsule; secondary actions live in More. */
+.shared-office .office-toolbar{position:relative;gap:8px;padding:10px 14px;border:0;flex-wrap:nowrap;z-index:3}.shared-office .camera-modes{border-radius:999px;flex:none}.shared-office .camera-modes button{border-radius:999px}.toolbar-reset,.toolbar-more>summary{display:flex;align-items:center;gap:7px;min-height:38px;border:0;border-radius:999px;background:#30271e;color:#e1cdb0;padding:9px 12px;font-size:11px;white-space:nowrap}.shared-office .find-agent-button{padding:9px 12px;border-radius:999px;background:#30271e;font-size:11px}.toolbar-more{margin-left:auto}.toolbar-more>summary{list-style:none;cursor:pointer}.toolbar-more>summary::-webkit-details-marker{display:none}.toolbar-menu{position:absolute;top:calc(100% - 6px);right:14px;width:min(330px,calc(100vw - 54px));padding:14px;border:1px solid #756044;background:#241d17;border-radius:12px;box-shadow:0 12px 30px #0007;z-index:5}.toolbar-menu .room-picker{margin-bottom:12px}.toolbar-menu .room-picker select{width:100%;max-width:100%}.toolbar-menu>button{display:flex;align-items:center;gap:8px;min-height:40px;width:100%;background:#392e21;border:1px solid #756044;border-radius:7px;padding:9px;color:#eee0cb;font-size:11px}.toolbar-menu p{margin-top:12px;font-size:10px;line-height:1.8;color:#bfa98b}.toolbar-more>summary:focus-visible{outline:2px solid #f3d8a3;outline-offset:3px}.shared-office .office-toolbar .find-agent-button span{display:inline}
+@media(max-width:760px){.shared-office .office-toolbar{gap:5px;padding:9px 8px;flex-wrap:nowrap}.shared-office .camera-modes button{min-height:38px;padding:7px 8px;font-size:10px}.shared-office .find-agent-button{min-height:40px;padding:8px;font-size:10px}.toolbar-reset{min-height:40px;padding:8px}.toolbar-reset span{display:none}.toolbar-more>summary{min-height:40px;padding:8px;font-size:10px}.toolbar-menu .room-picker select{font-size:14px}.toolbar-menu{right:8px}.toolbar-more>summary>span{display:none}}

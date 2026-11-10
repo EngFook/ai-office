@@ -1,408 +1,809 @@
-import React, { Suspense, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import React, { Suspense, createContext, lazy, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { OrbitControls } from '@react-three/drei'
+import { ContactShadows, Environment, OrbitControls, PerformanceMonitor } from '@react-three/drei'
 import SceneLabel from './SceneLabel'
-import { ZONES, seatForIndex, agentPosition, sharedLocations, focusArea } from './office-layout'
+import { SCENE_ENV_URL, SCENE_ENV_INTENSITY, SUN_OFFSET, shadowFrustum, detectShadowMapSize, qualityTier, detectInitialTierId, degradedTierId, improvedTierId, tierDpr, monitorBounds } from './scene-quality'
+import { postEffectsEnabled } from './scene-postprocessing'
+import { codexWorkerIdentity } from './codex-office'
+import { claudeWorkerIdentity } from './claude-office'
+import { createMovement } from './movement'
+import { createSharedLayout, sharedSeatForAgent, sharedFocusArea, OFFICE_PROVIDERS, WORKSTATION_GEOMETRY } from './shared-layout'
+import { officeAgentLabel, officeRoleLabel } from './unified-office'
+import { t } from './i18n'
+import { personAppearance, shadowHeightFor, hashIndex } from './person-appearance'
+import { seatedMotion, walkMotion, isGlancing, clampHeadYaw, relativeYaw, stepHeadYaw, GLANCE_RADIUS, blinkScale, nodMotion, isChatting, CHAT_NOD } from './person-motion'
+import { createBakedContactShadows } from './baked-contact-shadows'
+import { figuresV8aEnabled } from './figure-vat'
+import { PROP_PALETTE } from './desk-prop-data'
+import { propPlacements, buildPropGeometry, propPickHandler, CODE_W, CODE_H, CODE_LINE, CODE_BG, drawCodeLine, shouldStepCode, steamParticle, STEAM_COUNT } from './desk-props'
+import CharacterSwitch from './CharacterSwitch.jsx'
+import WoodFloor from './WoodFloor.jsx'
+import { StudioEnvelope, ZonePlatforms, StudioDataScreen, StudioSoftFurnishings } from './StudioDesign.jsx'
+import CentralSocial from './CentralSocial.jsx'
+import { residentFigures } from './office-resident-layout.js'
+import ResidentLabels from './ResidentLabels.jsx'
+import OptionalSceneEffects from './OptionalSceneEffects.jsx'
+import './studio-beauty.css'
 
-const FLOOR_DATA = {
-  1: { provider: 'GPT Codex', accent: '#77b79d', departments: ['Engineering', 'Product', 'Quality', 'Operations'] },
-  2: { provider: 'Claude Code', accent: '#d89b79', departments: ['Research', 'Architecture', 'Code Review', 'Documentation'] },
-  3: { provider: 'Grok', accent: '#a494d0', departments: ['Strategy', 'Insights', 'Creative', 'Innovation'] },
-}
-const COUNT = 200
-const SKINS = ['#e1b59a', '#c68d70', '#a9694d', '#e5c1a3', '#875a48', '#d6a080']
-const HAIR = ['#312822', '#483329', '#231f20', '#75503b', '#51443b']
-const SHIRTS = ['#87a79a', '#c79d83', '#8193a2', '#a799ad', '#d0b59b', '#7d9290', '#b58e83']
+const BakedContactShadows = createBakedContactShadows(ContactShadows)
 
-function getAgent(floor, index) {
-  const data = FLOOR_DATA[floor] || FLOOR_DATA[1]
-  const department = data.departments[Math.floor(index / 50)]
-  const number = String(index + 1).padStart(3, '0')
-  return { id: `floor-${floor}-agent-${number}`, index, name: `${data.provider} ${number}`, role: department, department, provider: data.provider, floor, status: 'Not connected' }
-}
+const WOOD = '#634536', BRASS = '#b99a64', INK = '#272525'
+const { chairOffsetZ, monitorZ, screenZ } = WORKSTATION_GEOMETRY
+const workingRuntimeFor = agent => agent.runtimeAgents.find(worker => worker.status === 'working' && worker.observed !== false)
+const identityFor = agent => agent.provider === 'Codex' ? codexWorkerIdentity(workingRuntimeFor(agent)) : claudeWorkerIdentity(workingRuntimeFor(agent))
+const providerKeyFor = value => ({ 'Claude Code': 'claude', Codex: 'codex', Grok: 'grok', Gemini: 'gemini', 'Local Qwen': 'local-qwen' })[value] || (OFFICE_PROVIDERS[value] ? value : null)
+const providerFor = item => OFFICE_PROVIDERS[providerKeyFor(item.provider) || providerKeyFor(item.officeZone) || providerKeyFor(item.zone)] || OFFICE_PROVIDERS.grok
+const box = (x,y,z,w,h,d,color,angle=0) => ({x,y,z,w,h,d,color,angle})
+const localBox = (seat, item) => ({...item, x:seat.x+item.x*Math.cos(seat.angle)+item.z*Math.sin(seat.angle), z:seat.z-item.x*Math.sin(seat.angle)+item.z*Math.cos(seat.angle), angle:seat.angle, seat})
 
-function Block({ position, size, color, ...props }) {
-  return <mesh position={position} receiveShadow {...props}><boxGeometry args={size} /><meshStandardMaterial color={color} roughness={0.9} /></mesh>
-}
-
-// Each body part is instanced, keeping stable, individually clickable IDs.
-function Crowd({ floor, onSelectAgent, activeSet }) {
-  const refs = Array.from({ length: 9 }, () => useRef())
-  const person = useMemo(() => new THREE.Object3D(), [])
-  const color = useMemo(() => new THREE.Color(), [])
-  const agents = useMemo(() => Array.from({ length: COUNT }, (_, i) => {
-    const zone = Math.floor(i / 50)
-    const idle = agentPosition(floor, i, false)
-    return {
-      seat: seatForIndex(floor, i),
-      idleX: idle.x, idleZ: idle.z, idleAngle: idle.angle,
-      phase: i * 2.37, skin: SKINS[(i * 7 + zone) % SKINS.length], hair: HAIR[(i * 11 + zone) % HAIR.length], shirt: SHIRTS[(i * 13 + floor * 3) % SHIRTS.length]
-    }
-  }), [floor])
-
-  useLayoutEffect(() => {
-    agents.forEach((a, i) => {
-      const colors = [a.shirt, a.skin, a.hair, a.shirt, a.shirt, '#666a70', '#666a70', '#666a70', '#666a70']
-      refs.forEach((ref, part) => ref.current?.setColorAt(i, color.set(colors[part])))
+// One geometry and draw call per batch, including all desk and chair details.
+function Boxes({ items, onClick, unlit = false, shadows = true, opacity = 1, map = null, glow = 1, rounded = false }) {
+  const ref=useRef()
+  const roundedGeometry=useMemo(()=>rounded?new RoundedBoxGeometry(1,1,1,2,.08):null,[rounded])
+  useEffect(()=>()=>roundedGeometry?.dispose(),[roundedGeometry])
+  useLayoutEffect(()=>{
+    const object=new THREE.Object3D(),color=new THREE.Color()
+    items.forEach((item,index)=>{
+      object.position.set(item.x,item.y,item.z); object.rotation.set(0,item.angle || 0,0); object.scale.set(item.w,item.h,item.d); object.updateMatrix()
+      ref.current.setMatrixAt(index,object.matrix); ref.current.setColorAt(index,color.set(item.color))
     })
-    refs.forEach(ref => {
-      if (ref.current?.instanceColor) ref.current.instanceColor.needsUpdate = true
-      if (ref.current) ref.current.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 120)
-    })
-  }, [agents, color])
-
-  useFrame(({ clock }) => {
-    const t = clock.elapsedTime
-    agents.forEach((a, i) => {
-      const working = activeSet.has(i)
-      const x = working ? a.seat.chairX : a.idleX
-      const z = working ? a.seat.chairZ : a.idleZ
-      const angle = working ? a.seat.angle : a.idleAngle
-      const motion = Math.sin(t * (working ? 3 : .7) + a.phase)
-      const parts = [
-        [0, working ? 1.1 : 1.22, 0, 0, 1], [0, working ? 1.74 : 1.86, 0, 0, 1], [0, working ? 1.92 : 2.04, 0, 0, 1],
-        [-.34, working ? 1.08 : 1.2, 0, working ? -.8 + motion * .12 : 0, 1], [.34, working ? 1.08 : 1.2, 0, working ? -.8 - motion * .12 : 0, 1],
-        [-.15, working ? .72 : .48, working ? .27 : 0, working ? Math.PI / 2 : 0, 1], [.15, working ? .72 : .48, working ? .27 : 0, working ? Math.PI / 2 : 0, 1],
-        [-.15, .36, .56, 0, working ? 1 : 0], [.15, .36, .56, 0, working ? 1 : 0],
-      ]
-      parts.forEach(([px, py, pz, rx, visible], part) => {
-        const c = Math.cos(angle), s = Math.sin(angle)
-        person.position.set(x + px * c + pz * s, py + (working ? 0 : motion * .012), z - px * s + pz * c)
-        person.rotation.set(rx, angle, 0)
-        person.scale.set(visible, visible, visible)
-        person.updateMatrix()
-        refs[part].current?.setMatrixAt(i, person.matrix)
-      })
-    })
-    refs.forEach(ref => { if (ref.current) ref.current.instanceMatrix.needsUpdate = true })
-  })
-  const click = event => {
-    event.stopPropagation()
-    if (event.instanceId !== undefined) onSelectAgent?.(getAgent(floor, event.instanceId))
-  }
-  const hover = () => { document.body.style.cursor = 'pointer' }
-  const unhover = () => { document.body.style.cursor = 'auto' }
-  const props = { args: [null, null, COUNT], frustumCulled: false, onClick: click, onPointerOver: hover, onPointerOut: unhover }
-  return <group>
-    <instancedMesh ref={refs[0]} {...props}><capsuleGeometry args={[.24,.42,4,8]} /><meshStandardMaterial roughness={.85} /></instancedMesh>
-    <instancedMesh ref={refs[1]} {...props}><sphereGeometry args={[.205,10,8]} /><meshStandardMaterial roughness={.85} /></instancedMesh>
-    <instancedMesh ref={refs[2]} {...props}><sphereGeometry args={[.208,10,7,0,Math.PI*2,0,Math.PI*.52]} /><meshStandardMaterial roughness={1} /></instancedMesh>
-    {[3,4].map(n => <instancedMesh key={n} ref={refs[n]} {...props}><capsuleGeometry args={[.075,.42,3,6]} /><meshStandardMaterial roughness={.9} /></instancedMesh>)}
-    {[5,6].map(n => <instancedMesh key={n} ref={refs[n]} {...props}><capsuleGeometry args={[.1,.55,3,6]} /><meshStandardMaterial roughness={.9} /></instancedMesh>)}
-    {[7,8].map(n => <instancedMesh key={n} ref={refs[n]} {...props}><capsuleGeometry args={[.09,.38,3,6]} /><meshStandardMaterial roughness={.9} /></instancedMesh>)}
-  </group>
+    ref.current.count=items.length
+    ref.current.instanceMatrix.needsUpdate=true
+    if(ref.current.instanceColor)ref.current.instanceColor.needsUpdate=true
+  },[items])
+  return <instancedMesh ref={ref} args={[null,null,Math.max(1,items.length)]} frustumCulled={false} castShadow={shadows} receiveShadow={!unlit} onClick={onClick ? event=>{event.stopPropagation();onClick(items[event.instanceId])} : undefined}>
+    {rounded ? <primitive object={roundedGeometry} attach="geometry"/> : <boxGeometry args={[1,1,1]}/>}
+    {unlit ? <meshBasicMaterial toneMapped={false} map={map} color={[glow,glow,glow]} transparent={opacity<1} opacity={opacity} depthWrite={opacity===1}/> : <meshStandardMaterial roughness={opacity<1?.16:.78} metalness={.08} transparent={opacity<1} opacity={opacity} depthWrite={opacity===1}/>}
+  </instancedMesh>
 }
 
-function InstancedBoxes({ items, size, color }) {
-  const ref = useRef()
-  useLayoutEffect(() => {
-    const dummy = new THREE.Object3D()
-    items.forEach(([x,y,z,angle = 0], i) => { dummy.position.set(x,y,z); dummy.rotation.set(0,angle,0); dummy.updateMatrix(); ref.current.setMatrixAt(i, dummy.matrix) })
-    ref.current.instanceMatrix.needsUpdate = true
-  }, [items])
-  return <instancedMesh ref={ref} args={[null, null, items.length]} receiveShadow frustumCulled={false}><boxGeometry args={size}/><meshStandardMaterial color={color} roughness={.85}/></instancedMesh>
-}
-
-function Furniture({ floor }) {
-  // One permanent workstation per agent, including when every agent is active.
-  const desks = useMemo(() => Array.from({ length: COUNT }, (_, index) => seatForIndex(floor, index)), [floor])
-  const nooks = useMemo(() => ZONES.flatMap(cx => Array.from({length:5},(_,pod) => Array.from({length:5},(_,col) => [cx + (col-2)*3.6, .082, -10.8 + pod*6.3])).flat()), [])
-  const at = (y, forward=0) => desks.map(({x,z,dx,dz,angle}) => [x + dx*forward,y,z + dz*forward,angle])
-  const chairs = (y, forward=0) => desks.map(({chairX,chairZ,dx,dz,angle}) => [chairX + dx*forward,y,chairZ + dz*forward,angle])
-  const deskWidth = floor === 3 ? 1.35 : 2.3
-  return <>
-    {floor === 2 && <>
-      <InstancedBoxes items={nooks} size={[3.3,.012,4.8]} color="#dce3d8" />
-      <InstancedBoxes items={nooks.flatMap(([x,,z])=>[[x,.46,z-2.23],[x,.46,z+2.23]])} size={[3.3,.75,.1]} color="#a3b6a3" />
-    </>}
-    <InstancedBoxes items={at(.92)} size={[deskWidth,.12,floor === 3 ? .9 : 1.25]} color={floor === 2 ? '#d4c2a5' : floor === 3 ? '#ddb38c' : '#e0bc98'} />
-    <InstancedBoxes items={at(.48)} size={[deskWidth*.86,.9,.08]} color="#9b7962" />
-    <InstancedBoxes items={at(1.27,.32)} size={[.72,.46,.07]} color="#354c49" />
-    <InstancedBoxes items={at(1.27,.26)} size={[.64,.36,.02]} color="#88b4a6" />
-    <InstancedBoxes items={at(1.02,.32)} size={[.08,.16,.08]} color="#4f665c" />
-    <InstancedBoxes items={at(1.01,-.3)} size={[.65,.035,.24]} color="#eae3d5" />
-    <InstancedBoxes items={chairs(.52)} size={[.72,.14,.68]} color="#546e64" />
-    <InstancedBoxes items={chairs(.9,-.33)} size={[.72,.72,.12]} color="#657f72" />
-    <InstancedBoxes items={chairs(.27)} size={[.09,.48,.09]} color="#60726a" />
-    {ZONES.map((x,i) => <group key={i}>
-      {[-8.1,8.1].map(dx => <Plant key={dx} x={x+dx} z={20.6} />)}
-      <Plant x={x-8.1} z={4.2} />
-      <Plant x={x+8.1} z={-7} />
-      {Array.from({length:5},(_,pod)=>floor === 1 ? <group key={pod}>
-        <Block position={[x,.083,-10.8+pod*6.3]} size={[13.2,.012,4.5]} color={['#cfe0cc','#ecd2bb','#c9dfe0','#ddd0e2'][i]} />
-        <Block position={[x,1.1,-10.8+pod*6.3]} size={[12.3,.35,.12]} color={['#8cae94','#c4987d','#8db1b2','#aa9bbd'][i]} />
-      </group> : floor === 3 ? <mesh key={pod} position={[x,.09,-10.8+pod*6.3]} rotation={[-Math.PI/2,0,0]} scale={[6.7,2.7,1]}><circleGeometry args={[1,32]}/><meshStandardMaterial color={['#cfe0cc','#ecd2bb','#c9dfe0','#ddd0e2'][i]}/></mesh> : null)}
-      {/* Small shelves add useful visual landmarks between work areas. */}
-      <Block position={[x+8.05,.58,9]} size={[1.1,1.1,1.6]} color="#987760" />
-      <Block position={[x+8.05,1.16,9]} size={[1.15,.08,1.65]} color="#dfc4a2" />
-      <Block position={[x+8.05,1.34,9]} size={[.5,.3,.7]} color={['#608b79','#b97e67','#6d92a1','#9484a8'][i]} />
-    </group>)}
-  </>
-}
-
-function Plant({ x, z }) {
-  return <group position={[x,0,z]}>
-    <mesh position={[0,.32,0]}><cylinderGeometry args={[.35,.26,.64,8]}/><meshStandardMaterial color="#cbbba8"/></mesh>
-    <mesh position={[0,1.2,0]}><sphereGeometry args={[.75,8,7]}/><meshStandardMaterial color="#809f7e"/></mesh>
-    <mesh position={[-.35,.95,.1]}><sphereGeometry args={[.48,8,7]}/><meshStandardMaterial color="#6e926f"/></mesh>
-    <mesh position={[.35,1.05,-.1]}><sphereGeometry args={[.48,8,7]}/><meshStandardMaterial color="#739573"/></mesh>
-  </group>
-}
-
-function Sign({ position, children, accent = false, onClick, selected = false, visible = true }) {
-  return <SceneLabel position={position} visible={visible} style={{pointerEvents:onClick ? 'auto' : 'none',userSelect:'none'}}>
-    <button type="button" className={`scene-sign${accent ? ' scene-sign--accent' : ''}${selected ? ' scene-sign--selected' : ''}`} data-interactive={!!onClick} onClick={onClick} tabIndex={onClick ? 0 : -1}>{children}</button>
+function Sign({ position, children, caption, onClick, selected = false, visible = true, quietOnMobile = false }) {
+  const compact=useThree(state=>state.size.width<600)
+  return <SceneLabel position={position} visible={visible&&(!quietOnMobile||!compact||selected)} avoidCollisions priority={selected ? 4 : 1} style={{pointerEvents: onClick ? 'auto' : 'none'}}>
+    <button type="button" className={`scene-sign shared-office-sign${selected ? ' scene-sign--selected' : ''}`} onClick={onClick} tabIndex={onClick ? 0 : -1} data-interactive={!!onClick}>{children}{caption && <small>{caption}</small>}</button>
   </SceneLabel>
 }
 
-function SharedAreas({ accent, onSelectArea, floor, focus, onFocus }) {
-  const locations = sharedLocations(floor)
-  const shift = (target, original) => [target[0]-original[0],0,target[1]-original[1]]
-  return <group>
-    {/* Reception and shared circulation */}
-    <group position={shift(locations.reception,[-27,27.1])}>
-    <Block position={[-27,.075,27.1]} size={[18,.04,8]} color="#b5c9ba" />
-    <Block position={[-27,.7,27.1]} size={[7.5,1.35,1.35]} color="#81664f" />
-    <Block position={[-27,1.4,27.1]} size={[7.8,.12,1.7]} color="#f6f0e6" />
-    <Block position={[-27,1.01,27.79]} size={[3.8,.36,.03]} color={accent} />
-    {[-33,-21].map(x=><group key={x}>
-      <Block position={[x,.45,25.1]} size={[3,.65,1.15]} color="#69897b" />
-      <Block position={[x,.94,24.55]} size={[3,.8,.18]} color="#789b8a" />
-      <Block position={[x,.82,25.1]} size={[2.75,.12,1.05]} color="#91afa0" />
-    </group>)}
-    <Plant x={-34} z={28.6} />
-    <Plant x={-20} z={28.6} />
-    {floor === 2 && [-36,-18].map(x=><group key={x}>
-      <Block position={[x,1.15,29.5]} size={[2.2,2.2,.65]} color="#876a53" />
-      {[.55,1.05,1.55].map((y,i)=><Block key={y} position={[x,y,29.85]} size={[1.8,.27,.08]} color={['#a5bfad','#c9967b','#cbb77f'][i]} />)}
-    </group>)}
-    {floor === 3 && [-36,-18].map(x=><group key={x}>
-      <Block position={[x,1.3,29.5]} size={[2.4,2.35,.12]} color="#f2e5d0" />
-      {[0,1,2].map(i=><Block key={i} position={[x-.65+i*.65,1.4+(i%2)*.35,29.59]} size={[.44,.38,.03]} color={['#d9957c','#a3c0ae','#b1a1c9'][i]} />)}
-    </group>)}
-    <Sign position={[-27,3.6,27]} accent onClick={()=>onFocus("reception")} selected={focus==="reception"} visible={focus==="overview" || focus==="reception"}>RECEPTION ↗</Sign>
-    </group>
-
-    {/* Enclosed meeting room with a large table, eight chairs, and an open doorway. */}
-    <group position={shift(locations.meeting,[0,27])}>
-    <Block position={[0,.075,27]} size={[20,.04,8.2]} color="#709789" />
-    <Block position={[0,.66,22.9]} size={[20,1.3,.18]} color="#58776c" />
-    <Block position={[-10,.66,27]} size={[.18,1.3,8.2]} color="#58776c" />
-    <Block position={[10,.66,27]} size={[.18,1.3,8.2]} color="#58776c" />
-    {[-6.25,6.25].map(x=><Block key={x} position={[x,.66,31.1]} size={[7.5,1.3,.18]} color="#58776c" />)}
-    <Block position={[0,1.34,22.9]} size={[20,.08,.28]} color="#f5f3e9" />
-    <Block position={[-10,1.34,27]} size={[.28,.08,8.2]} color="#f5f3e9" />
-    <Block position={[10,1.34,27]} size={[.28,.08,8.2]} color="#f5f3e9" />
-    {/* Glass above the low walls keeps the room enclosed without hiding the table. */}
-    {[-10,10].map(x=><group key={x}>
-      <mesh position={[x,2.15,27]}><boxGeometry args={[.06,1.55,8.2]}/><meshStandardMaterial color="#b5d8cb" transparent opacity={.16} depthWrite={false} roughness={.1}/></mesh>
-      <Block position={[x,2.97,27]} size={[.1,.08,8.2]} color="#c5d6c9"/>
-      {[23,27,31].map(z=><Block key={z} position={[x,2.15,z]} size={[.08,1.65,.08]} color="#a1b8ac"/>)}
-    </group>)}
-    <Block position={[0,2.2,22.9]} size={[20,1.65,.16]} color="#6d8a7b" />
-    <Block position={[0,2.28,23.02]} size={[5.5,2.45,.16]} color="#233f3d" />
-    <Block position={[0,2.28,23.13]} size={[5.15,2.12,.04]} color="#344f53" />
-    {[-1.4,-.7,0,.7,1.4].map((x,i)=><Block key={x} position={[x,2.1,23.17]} size={[.36,.4+i*.22,.02]} color={i%2 ? '#c7b191' : '#9cbdaf'} />)}
-    <Block position={[-6.7,2.22,23.06]} size={[3.8,2.1,.12]} color="#f0e7d5" />
-    {[-7.7,-6.7,-5.7].map((x,i)=><Block key={x} position={[x,2.4,23.14]} size={[.55,.55,.02]} color={['#d7a27e','#a6bd9e','#b2a5c6'][i]}/>)}
-    <Plant x={8.6} z={24.1}/>
-    {floor === 3 ? <>
-      <mesh position={[0,.82,27]}><cylinderGeometry args={[2.25,2.25,.2,32]}/><meshStandardMaterial color="#ecc293"/></mesh>
-      <Block position={[0,.4,27]} size={[.5,.8,.5]} color="#8e7c69" />
-      {Array.from({length:8},(_,i)=>{const a=i*Math.PI/4; return <group key={i} position={[Math.cos(a)*3.1,0,27+Math.sin(a)*3.1]} rotation={[0,-a,0]}>
-        <Block position={[0,.5,0]} size={[1.2,.2,1]} color="#bf795d" />
-        <Block position={[.48,.94,0]} size={[.16,.8,1.2]} color="#bf795d" />
-      </group>})}
-    </> : <>
-      <Block position={[0,.82,27]} size={[10,.2,2.5]} color="#ecc293" />
-      {[-4,4].map(x=><Block key={x} position={[x,.4,27]} size={[.18,.8,1.8]} color="#8e7c69" />)}
-      {[-3.75,-1.25,1.25,3.75].flatMap(x=>[-1.85,1.85].map(z=><group key={`${x}-${z}`}>
-        <Block position={[x,.5,27+z]} size={[1.2,.2,1]} color="#bf795d" />
-        <Block position={[x,.94,27+z+(z<0?-.42:.42)]} size={[1.2,.8,.16]} color="#bf795d" />
-      </group>))}
-    </>}
-    <Block position={[0,.93,27]} size={[1.8,.06,.8]} color="#f7f1e4" />
-    <Block position={[0,.98,27]} size={[.8,.05,.45]} color={accent} />
-    {[-1.5,1.5].map(x=><group key={x}>
-      <Block position={[x,.95,27.35]} size={[.82,.06,.58]} color="#c0c8c3"/>
-      <Block position={[x,1.23,27.64]} size={[.82,.52,.05]} color="#3d5656"/>
-      <mesh position={[x+.6,1.07,27.35]}><cylinderGeometry args={[.12,.1,.26,12]}/><meshStandardMaterial color="#f7eee0"/></mesh>
-    </group>)}
-    <Sign position={[0,4.3,22.9]} accent onClick={()=>onFocus("meeting")} selected={focus==="meeting"} visible={focus==="overview" || focus==="meeting"}>MEETING ROOM <small>· 8 SEATS ↗</small></Sign>
-    </group>
-
-    {/* Reports and project progress remain accessible from the scene. */}
-    <group position={shift(locations.reports,[27,27.1])}>
-    <Block position={[27,.075,27.1]} size={[18,.04,8]} color="#b5c9ba" />
-    {[-2,0,2].map((x,i)=><group key={x}>
-      <Block position={[27+x,.8,27.1]} size={[1.7,1.5,1]} color={i===1 ? '#aec4b6' : '#d6c7b5'} />
-      {[.42,.85,1.25].map(y=><Block key={y} position={[27+x,y,27.62]} size={[1.35,.025,.02]} color="#a99b8e" />)}
-    </group>)}
-    <Plant x={34} z={28.6} />
-    <Sign visible={focus==="overview"} position={[27,3.6,27.1]} accent onClick={()=>onFocus("reports")}>REPORTS & PROGRESS ↗</Sign>
-    <Sign visible={focus==="reports"} position={[27,3.6,25]} accent onClick={() => onSelectArea?.('reports')}>OPEN REPORTS ↗</Sign>
-    <Sign visible={focus==="reports"} position={[27,3.6,29.3]} accent onClick={() => onSelectArea?.('projects')}>VIEW PROGRESS ↗</Sign>
-    </group>
+function Plant({ x, z, tall = false }) {
+  return <group position={[x,0,z]}>
+    <mesh position={[0,.36,0]} castShadow><cylinderGeometry args={[.43,.32,.72,10]}/><meshStandardMaterial color="#a18b70" roughness={.9}/></mesh>
+    <mesh position={[0,tall ? 1.7 : 1.1,0]} scale={[.72,tall ? 1.35 : .8,.72]} castShadow><icosahedronGeometry args={[1,1]}/><meshStandardMaterial color="#536f4b" roughness={1}/></mesh>
+    <mesh position={[-.4,tall ? 1.3 : .95,.25]} scale={[.55,.7,.5]} castShadow><icosahedronGeometry args={[1,0]}/><meshStandardMaterial color="#7b8d5d" roughness={1}/></mesh>
   </group>
 }
 
-function FrontCommons({ floor, focus }) {
-  if (floor === 1) return null
-  const colors = floor === 2 ? ['#cadbc8','#d8e3d2','#c6d9ce','#dce4d4'] : ['#dbc7b3','#d2b9c8','#c8d6d0','#d9c9df']
-  return <group>
-    {ZONES.map((x,i)=><group key={x}>
-      <Block position={[x,.075,27.1]} size={[16.4,.04,7.4]} color={colors[i]} />
-      {[-4.4,4.4].map(dx=><group key={dx}>
-        <Block position={[x+dx,.47,27.1]} size={[2.8,.7,1.3]} color={floor===2 ? '#6f8f80' : '#b67f6b'} />
-        <Block position={[x+dx,.98,26.5]} size={[2.8,.72,.16]} color={floor===2 ? '#86a594' : '#c99a85'} />
-      </group>)}
-      <Block position={[x,.46,27.1]} size={[2.4,.12,1.25]} color="#d6b28e" />
-      <Block position={[x,.54,27.1]} size={[.65,.04,.42]} color={floor===2 ? '#789b85' : '#aa91b2'} />
-      <Plant x={x-7.1} z={29.2} />
-    </group>)}
-    <Sign visible={focus==="overview"} position={[0,3.4,27.1]} accent>{floor===2 ? 'READING LOUNGES' : 'CREATIVE LOUNGES'}</Sign>
+function FloorLamp({ x, z }) {
+  return <group position={[x,0,z]}>
+    <mesh position={[0,.11,0]}><cylinderGeometry args={[.48,.5,.12,12]}/><meshStandardMaterial color={INK}/></mesh>
+    <mesh position={[0,1.55,0]}><cylinderGeometry args={[.035,.035,2.9,6]}/><meshStandardMaterial color={BRASS} metalness={.5} roughness={.4}/></mesh>
+    <mesh position={[0,2.85,0]} castShadow><cylinderGeometry args={[.45,.72,.65,12,1,true]}/><meshStandardMaterial color="#e4cfaa" emissive="#e6ac62" emissiveIntensity={.28} side={THREE.DoubleSide}/></mesh>
   </group>
 }
 
-function Office({ floor, onSelectAgent, onSelectArea, activeSet, focus, onFocus }) {
-  const data = FLOOR_DATA[floor] || FLOOR_DATA[1]
+const prefersReducedMotion = () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+// V6 scrolling "code" for every workstation screen: one tiny shared canvas,
+// shifted up one line at CODE_HZ, multiplied by each screen's instance colour
+// (provider tint while working, dark when idle). Zero extra draw calls - the
+// texture rides the existing screens batch. Frozen under reduced motion.
+function useCodeTexture() {
+  const {texture, ctx}=useMemo(()=>{
+    const canvas=document.createElement('canvas'); canvas.width=CODE_W; canvas.height=CODE_H
+    const ctx=canvas.getContext('2d'); ctx.fillStyle=CODE_BG; ctx.fillRect(0,0,CODE_W,CODE_H)
+    for(let y=0;y<CODE_H;y+=CODE_LINE)drawCodeLine(ctx,CODE_W,y,CODE_LINE)
+    const texture=new THREE.CanvasTexture(canvas); texture.colorSpace=THREE.SRGBColorSpace
+    return {texture, ctx}
+  },[])
+  const last=useRef(0), frozen=useMemo(prefersReducedMotion,[])
+  useFrame(()=>{
+    const now=performance.now()
+    if(frozen||!shouldStepCode(now,last.current))return
+    last.current=now
+    ctx.drawImage(ctx.canvas,0,-CODE_LINE)
+    ctx.fillStyle=CODE_BG; ctx.fillRect(0,CODE_H-CODE_LINE,CODE_W,CODE_LINE)
+    drawCodeLine(ctx,CODE_W,CODE_H-CODE_LINE,CODE_LINE)
+    texture.needsUpdate=true
+  })
+  return texture
+}
+
+// One InstancedMesh of static matrices per prop type; all four share one
+// material and the 1xN palette texture, so the V6 props cost 4 draw calls.
+function PropBatch({ geometry, material, items, onPick }) {
+  const ref=useRef(), dummy=useMemo(()=>new THREE.Object3D(),[])
+  useLayoutEffect(()=>{
+    items.forEach((item,i)=>{
+      dummy.position.set(item.x,item.y,item.z); dummy.rotation.set(0,item.yaw,0); dummy.scale.setScalar(item.scale); dummy.updateMatrix()
+      ref.current.setMatrixAt(i,dummy.matrix)
+    })
+    ref.current.count=items.length
+    ref.current.instanceMatrix.needsUpdate=true
+  },[items,dummy])
+  return <instancedMesh ref={ref} args={[geometry,material,Math.max(1,items.length)]} frustumCulled={false} receiveShadow
+    onClick={onPick ? propPickHandler(items,onPick) : undefined}/>
+}
+
+// Billboarded steam puffs over the espresso machine; a pure (time, index)
+// loop, rendered only on the top quality tier and never under reduced motion.
+function CoffeeSteam({ origin }) {
+  const {steam}=useSceneQuality()
+  const reduced=useMemo(prefersReducedMotion,[])
+  const ref=useRef(), dummy=useMemo(()=>new THREE.Object3D(),[]), tint=useMemo(()=>new THREE.Color(),[])
+  const texture=useMemo(()=>{
+    const size=64, canvas=document.createElement('canvas'); canvas.width=canvas.height=size
+    const ctx=canvas.getContext('2d')
+    const gradient=ctx.createRadialGradient(size/2,size/2,2,size/2,size/2,size/2)
+    gradient.addColorStop(0,'rgba(255,255,255,.85)'); gradient.addColorStop(.5,'rgba(255,255,255,.35)'); gradient.addColorStop(1,'rgba(255,255,255,0)')
+    ctx.fillStyle=gradient; ctx.fillRect(0,0,size,size)
+    return new THREE.CanvasTexture(canvas)
+  },[])
+  useFrame(({clock,camera})=>{
+    if(!ref.current)return
+    const t=clock.elapsedTime
+    for(let i=0;i<STEAM_COUNT;i++){
+      const puff=steamParticle(t,i)
+      dummy.position.set(origin.x+puff.drift,origin.y+puff.y,origin.z+puff.sway)
+      dummy.quaternion.copy(camera.quaternion); dummy.scale.setScalar(puff.scale); dummy.updateMatrix()
+      ref.current.setMatrixAt(i,dummy.matrix)
+      ref.current.setColorAt(i,tint.setScalar(puff.fade*.5))
+    }
+    ref.current.instanceMatrix.needsUpdate=true
+    if(ref.current.instanceColor)ref.current.instanceColor.needsUpdate=true
+  })
+  if(!steam||reduced)return null
+  return <instancedMesh ref={ref} args={[null,null,STEAM_COUNT]} frustumCulled={false} raycast={()=>null} renderOrder={2}>
+    <planeGeometry args={[1,1]}/>
+    <meshBasicMaterial map={texture} transparent depthWrite={false} blending={THREE.AdditiveBlending} toneMapped={false}/>
+  </instancedMesh>
+}
+
+// V6 desk props (no furniture/layout change): CC0 Kenney keyboards, side
+// monitors, coffee cups and small plants on existing surfaces, deterministic
+// per desk hash. Clicking a desk prop selects its seat like the desk itself.
+function DeskProps({ layout, onPick }) {
+  const placements=useMemo(()=>propPlacements(layout),[layout])
+  const material=useMemo(()=>{
+    const cell=8, canvas=document.createElement('canvas')
+    canvas.width=PROP_PALETTE.length*cell; canvas.height=cell
+    const ctx=canvas.getContext('2d')
+    PROP_PALETTE.forEach((color,i)=>{ctx.fillStyle=color;ctx.fillRect(i*cell,0,cell,cell)})
+    const palette=new THREE.CanvasTexture(canvas)
+    palette.colorSpace=THREE.SRGBColorSpace; palette.magFilter=palette.minFilter=THREE.NearestFilter; palette.generateMipmaps=false
+    return new THREE.MeshStandardMaterial({map:palette,roughness:.82,metalness:.05})
+  },[])
+  const geometries=useMemo(()=>({
+    keyboard:buildPropGeometry('keyboard'), monitor:buildPropGeometry('monitor'),
+    cup:buildPropGeometry('cup'), plant:buildPropGeometry('plant'),
+  }),[])
   return <group>
-    {/* A 79 × 58 footprint is approximately twice the previous floor area. */}
-    <Block position={[0,-.18,4]} size={[79,.35,58]} color="#85664e" />
-    <Block position={[0,.015,4]} size={[78.5,.06,57.5]} color="#bd916b" />
-    {Array.from({ length: 39 }, (_, i) => <Block key={i} position={[-38+i*2,.052,4]} size={[.025,.006,57.4]} color="#a67654" />)}
-    {floor !== 1 && <group>
-      <Block position={[floor===2 ? -51 : 51,-.18,0]} size={[23,.35,48]} color="#85664e" />
-      <Block position={[floor===2 ? -51 : 51,.015,0]} size={[23,.06,47.5]} color="#bd916b" />
-      {Array.from({length:12},(_,i)=><Block key={i} position={[(floor===2 ? -62 : 40)+i*2,.052,0]} size={[.025,.006,47.4]} color="#a67654" />)}
-    </group>}
-    <Block position={[0,.065,22]} size={[77,.03,3.1]} color="#ae805f" />
-    {/* Department partitions stop at the shared corridor. */}
-    {[-38.2,-19.1,0,19.1,38.2].map(x=>{
-      const opensToWing = (floor===2 && x===-38.2) || (floor===3 && x===38.2)
-      const pieces = !opensToWing ? [[-1.2,46.2]] : floor===2 ? [[-21.5,5.6],[-8.5,13.6],[8.5,13.6],[20.3,3.2]] : [[-22,4.6],[-11.5,9.6],[6,18.6],[20.3,3.2]]
-      return <group key={x}>{pieces.map(([z,length])=><group key={z}>
-        <Block position={[x,.58,z]} size={[.2,1.12,length]} color="#98aa9d" />
-        <Block position={[x,1.16,z]} size={[.27,.07,length]} color="#e8d4bb" />
-      </group>)}</group>
-    })}
-    {ZONES.map((x,i)=>{
-      const atDesk = Array.from(activeSet).filter(n => Math.floor(n / 50) === i).length
-      return <group key={x}>
-        <Block position={[x,.06,-19.5]} size={[18.5,.025,9.8]} color={['#84ae97','#c79981','#86aaac','#a999bb'][i]} />
-        <Block position={[x,.06,3.85]} size={[17.3,.025,35.9]} color={['#bbd1bd','#dfc5ad','#b7cfd1','#cec1d6'][i]} />
-        {[-8.25,8.25].map(dx=><group key={dx}>
-          <Block position={[x+dx,.42,-19.3]} size={[1.05,.75,3.6]} color={['#527b68','#966754','#557d83','#796e8e'][i]} />
-          <Block position={[x+dx,.88,-19.3]} size={[1.05,.18,3.6]} color={['#739b83','#bd8a72','#769da0','#9b8daa'][i]} />
-        </group>)}
-        {[-5.8,5.8].map(dx=><group key={dx}>
-          <Block position={[x+dx,.56,-14.5]} size={[7,1.08,.18]} color="#839c8d" />
-          <Block position={[x+dx,1.12,-14.5]} size={[7,.06,.25]} color="#ead6bb" />
-        </group>)}
-        <Block position={[x,.08,-24.25]} size={[17.2,.04,.24]} color={data.accent} />
-        <Sign position={[x,3.6,-22.8]} onClick={()=>onFocus(`idle-${i}`)} selected={focus===`idle-${i}`} visible={focus==="overview" || focus===`department-${i}` || focus===`idle-${i}`}>IDLE ROOM <small>· {50-atDesk} ↗</small></Sign>
-        <Sign position={[x,3.6,-10.7]} onClick={()=>onFocus(`department-${i}`)} selected={focus===`department-${i}`} visible={focus==="overview" || focus===`department-${i}` || focus===`idle-${i}`}>{data.departments[i].toUpperCase()} <small>· {atDesk} AT DESKS ↗</small></Sign>
+    <PropBatch geometry={geometries.keyboard} material={material} items={placements.keyboards} onPick={onPick}/>
+    <PropBatch geometry={geometries.monitor} material={material} items={placements.monitors} onPick={onPick}/>
+    <PropBatch geometry={geometries.cup} material={material} items={placements.cups} onPick={onPick}/>
+    <PropBatch geometry={geometries.plant} material={material} items={placements.plants} onPick={onPick}/>
+    <CoffeeSteam origin={placements.steam}/>
+  </group>
+}
+
+function Workstations({ layout, focus, onFocus, onSelectAgent, onSelectArea }) {
+  const items=useMemo(()=>layout.desks.flatMap(seat=>{
+    const provider=providerKeyFor(seat.provider) || providerKeyFor(seat.zone) || 'grok'
+    const accent=providerFor(seat).color
+    const fabric={claude:'#685247',codex:'#465c50',grok:'#575060',gemini:'#52657b','local-qwen':'#655d40'}[provider]
+    return [
+      box(0,1.45,monitorZ,1.45,.8,.065,INK),box(0,1.1,monitorZ,.08,.3,.08,BRASS),box(0,1.05,monitorZ-.05,.5,.04,.3,INK),
+      // V6: the flat keyboard box was replaced by the instanced Kenney keyboard.
+      box(0,1.05,-.35,1.35,.025,.56,'#343b36'),
+      box(.72,1.08,-.32,.13,.04,.21,'#b8ad96'),box(-1.65,1.06,-.1,.48,.04,.62,accent),
+      ...(!seat.roundTable ? [box(1.7,.55,.1,.68,.85,1.35,'#503a30'),box(1.7,.76,-.59,.28,.025,.03,BRASS)] : []),
+      box(0,.57,chairOffsetZ,.95,.18,.85,fabric),box(0,1.06,chairOffsetZ-.37,.94,.86,.15,fabric),
+      ...[-1,1].map(side=>box(side*.48,.81,chairOffsetZ,.09,.07,.65,INK)),
+      box(0,.3,chairOffsetZ,.09,.5,.09,BRASS),box(0,.12,chairOffsetZ,.9,.06,.1,INK),box(0,.12,chairOffsetZ,.1,.06,.9,INK),
+      // A small shaded task lamp: emissive shade, no extra real-time light.
+      box(-1.72,1.06,.5,.34,.035,.26,BRASS),box(-1.72,1.38,.5,.035,.65,.035,BRASS),box(-1.62,1.72,.43,.52,.06,.28,'#d9c49d'),
+    ].map(item=>localBox(seat,item))
+  }),[layout])
+  const benches=useMemo(()=>layout.benches.flatMap(bench=>[
+    box(bench.x,.97,bench.z,bench.width,.12,bench.depth,'#977653'),
+    box(bench.x,.9,bench.z-bench.depth/2,bench.width,.04,.04,BRASS),
+    ...[-1,1].map(side=>box(bench.x+side*(bench.width/2-.4),.48,bench.z,.16,.9,bench.depth-.3,INK)),
+    ...(bench.width>10?[box(bench.x,.48,bench.z,.16,.9,bench.depth-.3,INK)]:[]),
+  ]),[layout])
+  const screens=useMemo(()=>layout.desks.map(seat=>localBox(seat,box(0,1.45,screenZ,1.32,.68,.012,seat.occupant?.liveStatus==='working' ? providerFor(seat).color : '#34403e'))),[layout])
+  const codeTexture=useCodeTexture()
+  const choose=seat=>{
+    if(seat?.occupant)onSelectAgent?.(seat.occupant)
+    else if(seat)onFocus?.(`department-${layout.zones.findIndex(zone=>zone.id===seat.zone)}`)
+  }
+  return <group>
+    <Boxes items={benches}/>
+    {layout.roundTables.map(table=><group key={table.id}>
+      <RoundTable {...table} height={.97} centerpiece onClick={()=>onFocus?.('department-0')}/>
+    </group>)}
+    <Boxes items={items} onClick={item=>choose(item?.seat)}/>
+    <Boxes items={screens} unlit shadows={false} map={codeTexture} onClick={item=>choose(item?.seat)}/>
+    <DeskProps layout={layout} onPick={choose}/>
+    {/* Desk name tags removed: info shows only when a character/desk is clicked */}
+  </group>
+}
+
+// Real work controls active counts; a bounded decorative idle pool adds traffic.
+// Every person on the floor (working, reviewing, researching, meeting, reporting, resting)
+// is drawn here and walks along the aisles whenever its state changes.
+const PEOPLE_CAP = 160
+// V4 eye placement in the head's local frame (head sphere radius .205): the
+// beads sit on the face surface just below the hair-cap rim (the cap reaches
+// theta .52*PI, i.e. y ~ -.013), so they read on the face, not in the hair.
+const EYE_X = .075, EYE_Y = -.045, EYE_Z = .185
+// Radial-gradient alpha disc shared by every blob shadow (one draw call for all feet).
+function makeBlobTexture() {
+  const size=64, canvas=document.createElement('canvas'); canvas.width=canvas.height=size
+  const ctx=canvas.getContext('2d')
+  const gradient=ctx.createRadialGradient(size/2,size/2,2,size/2,size/2,size/2)
+  gradient.addColorStop(0,'rgba(0,0,0,.5)'); gradient.addColorStop(.55,'rgba(0,0,0,.3)'); gradient.addColorStop(1,'rgba(0,0,0,0)')
+  ctx.fillStyle=gradient; ctx.fillRect(0,0,size,size)
+  return new THREE.CanvasTexture(canvas)
+}
+function People({ layout, meeting, onArrived, onSelectAgent, residents = [], onSelectProvider, ambient = true }) {
+  const movement=useMemo(()=>createMovement({ lounge: layout.lounge, commons: layout.commons }),[])
+  const first=useRef(true), figuresRef=useRef([]), arrivedKey=useRef('')
+  const refs=[useRef(),useRef(),useRef(),useRef(),useRef(),useRef(),useRef()]
+  const blobRef=useRef(), blobTexture=useMemo(makeBlobTexture,[])
+  // V4: both eyes of every figure share one instanced mesh; a blink is a Y
+  // scale dip on the pair, so the whole crowd's eyes stay a single draw call.
+  const eyeRef=useRef(), eye=useMemo(()=>new THREE.Object3D(),[]), eyeOffset=useMemo(()=>new THREE.Vector3(),[])
+  const looks=useMemo(()=>new Map(),[])
+  // V3: one damped head-yaw state per figure (the only motion state kept):
+  // {yaw, t}, timestamped so throttled frames keep their elapsed time.
+  const headYaws=useMemo(()=>new Map(),[])
+  const dummy=useMemo(()=>new THREE.Object3D(),[]), color=useMemo(()=>new THREE.Color(),[])
+  // V5: on phone tiers, figures near or past the screen edge refresh their
+  // matrices at distantHz instead of every rendered frame (one shared gate).
+  const {distantHz}=useSceneQuality()
+  const distantGate=useRef(0), projected=useMemo(()=>new THREE.Vector3(),[])
+  useEffect(()=>{
+    const working=layout.agents.map(agent=>{ const desk=sharedSeatForAgent(agent,layout); return desk && { id: agent.id, agent, provider: providerKeyFor(agent.provider) || desk.provider, desk } }).filter(Boolean)
+    figuresRef.current=[...residentFigures(residents), ...movement.sync({ working, meeting, ambient, now: performance.now(), initial: first.current })]
+    first.current=false
+  },[layout,meeting,movement,ambient,residents])
+  useFrame(({clock,camera})=>{
+    const now=performance.now(), figures=[...residentFigures(residents), ...movement.step(now)]
+    figuresRef.current=figures
+    const arrived=figures.filter(f=>f.agent&&!f.walking&&!f.queue.length&&f.spot?.id?.startsWith('desk:')).map(f=>f.id).sort().join('|')
+    if(arrived!==arrivedKey.current){arrivedKey.current=arrived;onArrived?.(new Set(arrived?arrived.split('|'):[]))}
+    let skipDistant=false
+    if(Number.isFinite(distantHz)){
+      if(now-distantGate.current>=1000/distantHz)distantGate.current=now
+      else skipDistant=true
+    }
+    const t=clock.elapsedTime
+    if(headYaws.size>PEOPLE_CAP*2)headYaws.clear()
+    figures.slice(0,PEOPLE_CAP).forEach((f,i)=>{
+      // A throttled figure keeps last frame's matrices for at most 1/distantHz.
+      if(skipDistant){
+        projected.set(f.x,1.2,f.z).project(camera)
+        if(Math.abs(projected.x)>.72||Math.abs(projected.y)>.72)return
+      }
+      const h=hashIndex(f.id), provider=OFFICE_PROVIDERS[f.provider]||OFFICE_PROVIDERS.grok
+      const lookKey=`${f.id}|${provider.color}`
+      let look=looks.get(lookKey); if(!look){look=personAppearance(f.id,provider.color);looks.set(lookKey,look)}
+      const colors=[look.shirt,look.skin,look.hair,look.shirt,look.shirt,look.trousers,look.trousers]
+      refs.forEach((ref,part)=>ref.current?.setColorAt(i,color.set(colors[part])))
+      // V3 head look-at: during a glance window the head turns (damped, neck
+      // clamped, rear targets ignored) toward the nearest figure; otherwise it
+      // settles back to the monitor / the walking direction.
+      // V4 lounge chat: resting figures turn toward a sofa neighbour in longer,
+      // more frequent windows than the desk glances, as if mid-conversation.
+      const chatting=f.sitting&&f.spot?.kind==='lounge'&&isChatting(t,h)
+      let target=0
+      if(chatting||(f.sitting&&isGlancing(t,h))){
+        let best=null,bestD=GLANCE_RADIUS*GLANCE_RADIUS
+        for(const other of figures){ if(other===f)continue; if(chatting&&other.spot?.kind!=='lounge')continue; const dx=other.x-f.x,dz=other.z-f.z,d=dx*dx+dz*dz; if(d<bestD){bestD=d;best=other} }
+        if(best)target=clampHeadYaw(relativeYaw(f.x,f.z,f.angle,best.x,best.z))
+      }
+      // stepHeadYaw damps over the time since this figure's own last update,
+      // so frames skipped by the distant throttle above don't slow the head.
+      const headYaw=stepHeadYaw(headYaws,f.id,target,t)
+      let parts
+      if(f.sitting){
+        const {typing,bob,stretch,lean}=seatedMotion(t,h,!!f.agent)
+        const rest=stretch+lean, armBase=f.agent?-.8:-.2
+        // Head/hair pitch reads on the hair cap: down at the keyboard while
+        // typing, up and back during a stretch or lean-back. V4 adds agreeing
+        // nod bursts in meetings and a gentle talking nod while chatting.
+        const nod=(f.spot?.kind==='meeting'?nodMotion(t,h):0)+(chatting?(Math.sin(t*5+h)+1)*.5*CHAT_NOD:0)
+        const headPitch=(f.agent?.12:.04)*(1-rest)-lean*.35-stretch*.15+nod
+        const headX=Math.sin(headYaw)*.06
+        parts=[
+          [0,1.1+bob,0,(f.agent?.05:0)*(1-rest)-lean*.3-stretch*.08],
+          [headX,1.74+bob+stretch*.03,-lean*.2,headPitch,headYaw],
+          [headX,1.92+bob+stretch*.03,-lean*.2,headPitch,headYaw],
+          [-.34-stretch*.06,1.1*(1-rest)+1.04*lean+1.66*stretch+bob,.12*(1-rest)-.04*lean-.02*stretch,(armBase+typing)*(1-rest)-.15*lean-.05*stretch],
+          [.34+stretch*.06,1.1*(1-rest)+1.04*lean+1.66*stretch+bob,.12*(1-rest)-.04*lean-.02*stretch,(armBase-typing)*(1-rest)-.15*lean-.05*stretch],
+          [-.15,.64,.2+lean*.15,Math.PI/2-lean*.2],
+          [.15,.64,.2+lean*.15,Math.PI/2-lean*.2],
+        ]
+      }else{
+        // Only real walkers get the gait; a figure standing still (e.g. the
+        // report-point dwell) holds a neutral pose via the walking guard.
+        const {swing,lift,lean,sway}=walkMotion(t,h,f.walking)
+        // Torso and arms lean forward and sway at step rate (hip sway); the
+        // head counter-rotates half the sway so the gaze stays steady.
+        parts=[
+          [0,1.42+lift,0,lean,sway],
+          [0,2.06+lift,.08,lean*.4,headYaw-sway*.5],
+          [0,2.24+lift,.08,lean*.4,headYaw-sway*.5],
+          [-.34,1.4+lift,0,swing+lean,sway],
+          [.34,1.4+lift,0,-swing+lean,sway],
+          [-.15,.55,0,-swing,sway*.6],
+          [.15,.55,0,swing,sway*.6],
+        ]
+      }
+      const s=look.height
+      parts.forEach(([x,y,z,rx,ry=0],part)=>{
+        dummy.position.set(f.x+(x*Math.cos(f.angle)+z*Math.sin(f.angle))*s,y*s,f.z+(-x*Math.sin(f.angle)+z*Math.cos(f.angle))*s)
+        dummy.rotation.set(rx,f.angle+ry,0,'YXZ'); dummy.scale.setScalar(s); dummy.updateMatrix()
+        refs[part].current?.setMatrixAt(i,dummy.matrix)
+        if(part!==1)return
+        // V4 eyes ride the head transform (dummy still holds it): two beads on
+        // the face, blinking by squashing their Y scale on a personal rhythm.
+        const lid=blinkScale(t,h)
+        for(let side=0;side<2;side++){
+          eyeOffset.set(side?EYE_X:-EYE_X,EYE_Y,EYE_Z).multiplyScalar(s).applyQuaternion(dummy.quaternion)
+          eye.position.copy(dummy.position).add(eyeOffset)
+          eye.quaternion.copy(dummy.quaternion)
+          eye.scale.set(s,s*lid,s); eye.updateMatrix()
+          eyeRef.current?.setMatrixAt(i*2+side,eye.matrix)
+        }
+      })
+      dummy.position.set(f.x,shadowHeightFor(f),f.z)
+      dummy.rotation.set(-Math.PI/2,0,0,'YXZ'); dummy.scale.setScalar(s); dummy.updateMatrix()
+      blobRef.current?.setMatrixAt(i,dummy.matrix)
+    })
+    ;[...refs,blobRef].forEach(ref=>{ if(!ref.current)return; ref.current.count=Math.min(PEOPLE_CAP,figures.length); ref.current.instanceMatrix.needsUpdate=true; if(ref.current.instanceColor)ref.current.instanceColor.needsUpdate=true })
+    if(eyeRef.current){ eyeRef.current.count=Math.min(PEOPLE_CAP,figures.length)*2; eyeRef.current.instanceMatrix.needsUpdate=true }
+  })
+  const click=event=>{event.stopPropagation();const f=figuresRef.current[event.instanceId];if(f?.resident)onSelectProvider?.(f.resident.provider);else if(f?.agent)onSelectAgent?.(f.agent)}
+  const props={args:[null,null,PEOPLE_CAP],frustumCulled:false,onClick:click,castShadow:true}
+  return <group>
+    <instancedMesh ref={refs[0]} {...props}><capsuleGeometry args={[.24,.42,4,8]}/><meshStandardMaterial roughness={.85}/></instancedMesh>
+    <instancedMesh ref={refs[1]} {...props}><sphereGeometry args={[.205,10,8]}/><meshStandardMaterial roughness={.85}/></instancedMesh>
+    <instancedMesh ref={refs[2]} {...props}><sphereGeometry args={[.208,10,7,0,Math.PI*2,0,Math.PI*.52]}/><meshStandardMaterial roughness={1}/></instancedMesh>
+    {[3,4].map(part=><instancedMesh key={part} ref={refs[part]} {...props}><capsuleGeometry args={[.075,.42,3,6]}/><meshStandardMaterial roughness={.9}/></instancedMesh>)}
+    {[5,6].map(part=><instancedMesh key={part} ref={refs[part]} {...props}><capsuleGeometry args={[.1,.55,3,6]}/><meshStandardMaterial roughness={.9}/></instancedMesh>)}
+    {/* V4 eyes: one batch for every figure's pair; no raycast so clicks still land on the body, no shadow casting from beads this small. */}
+    <instancedMesh ref={eyeRef} args={[null,null,PEOPLE_CAP*2]} frustumCulled={false} raycast={()=>null}>
+      <sphereGeometry args={[.034,5,4]}/>
+      <meshBasicMaterial color="#231d1a"/>
+    </instancedMesh>
+    {/* Soft blob shadow under every figure: one textured quad batch, no extra lights or shadow passes. */}
+    <instancedMesh ref={blobRef} args={[null,null,PEOPLE_CAP]} frustumCulled={false} renderOrder={1}>
+      <planeGeometry args={[.95,.95]}/>
+      <meshBasicMaterial map={blobTexture} transparent depthWrite={false} toneMapped={false} color="#000000"/>
+    </instancedMesh>
+  </group>
+}
+
+function WorkingPeople({ layout, focus, onSelectAgent, arrived }) {
+  const [hoveredId,setHoveredId]=useState(null)
+  const hoverTimer=useRef(null)
+  useEffect(()=>()=>clearTimeout(hoverTimer.current),[])
+  const refs = [useRef(),useRef(),useRef(),useRef(),useRef(),useRef(),useRef()]
+  const dummy = useMemo(()=>new THREE.Object3D(),[])
+  const color = useMemo(()=>new THREE.Color(),[])
+  // Bodies are drawn by People; this layer only adds click targets and the selected label once the person has sat down.
+  const workers = useMemo(()=>layout.agents.map((agent,index)=>({agent,seat:sharedSeatForAgent(agent,layout),index})).filter(w=>w.seat&&arrived?.has(w.agent.id)),[layout,arrived])
+  useLayoutEffect(()=>{
+    workers.forEach(({agent},i)=>{
+      const look = personAppearance(agent.id, providerFor(agent).color)
+      const colors = [look.shirt,look.skin,look.hair,look.shirt,look.shirt,look.trousers,look.trousers]
+      refs.forEach((ref,part)=>ref.current?.setColorAt(i,color.set(colors[part])))
+    })
+    refs.forEach(ref=>{if(ref.current?.instanceColor)ref.current.instanceColor.needsUpdate=true})
+  },[workers,color])
+  useFrame(({clock})=>{
+    workers.forEach(({seat,index},i)=>{
+      const motion=Math.sin(clock.elapsedTime*3+index*2.37)
+      const parts=[[0,1.1,0,0],[0,1.74,0,0],[0,1.92,0,0],[-.34,1.1,.12,-.8+motion*.09],[.34,1.1,.12,-.8-motion*.09],[-.15,.64,.2,Math.PI/2],[.15,.64,.2,Math.PI/2]]
+      parts.forEach(([x,y,z,rx],part)=>{
+        dummy.position.set(seat.chairX+x*Math.cos(seat.angle)+z*Math.sin(seat.angle),y,seat.chairZ-x*Math.sin(seat.angle)+z*Math.cos(seat.angle))
+        dummy.rotation.set(rx,seat.angle,0,'YXZ')
+        dummy.updateMatrix()
+        refs[part].current?.setMatrixAt(i,dummy.matrix)
+      })
+    })
+    refs.forEach(ref=>{if(ref.current)ref.current.instanceMatrix.needsUpdate=true})
+  })
+  const click=event=>{event.stopPropagation();const worker=workers[event.instanceId];if(worker)onSelectAgent?.(worker.agent)}
+  const hoverWorker=id=>{clearTimeout(hoverTimer.current);document.body.style.cursor='pointer';setHoveredId(id)}
+  const hover=event=>{const worker=workers[event.instanceId];if(worker)hoverWorker(worker.agent.id)}
+  const unhover=()=>{document.body.style.cursor='auto';clearTimeout(hoverTimer.current);hoverTimer.current=setTimeout(()=>setHoveredId(null),150)}
+  const props={args:[null,null,workers.length],frustumCulled:false,onClick:click,onPointerOver:hover,onPointerOut:unhover,castShadow:true}
+  return <group>
+    {workers.map(({agent,seat})=>{
+      const {shortId,project}=identityFor(agent)
+      const normalizedName=officeAgentLabel(agent.name), displayName=normalizedName===agent.name?agent.name:t(normalizedName)
+      const selected=focus===`agent-${agent.index}`
+      const showLabel=selected
+      const provider=providerFor(agent)
+      const select=event=>{event.stopPropagation();onSelectAgent?.(agent)}
+      return <group key={agent.id} position={[seat.chairX,0,seat.chairZ]}>
+        {selected && <mesh position={[0,.12,0]} rotation={[-Math.PI/2,0,0]}><ringGeometry args={[.72,.8,32]}/><meshBasicMaterial color={provider.marker} transparent opacity={.7} side={THREE.DoubleSide}/></mesh>}
+        <mesh position={[0,1.7,0]} onClick={select} onPointerOver={event=>{event.stopPropagation();hoverWorker(agent.id)}} onPointerOut={unhover}>
+          <capsuleGeometry args={[.67,2,4,8]}/><meshBasicMaterial transparent opacity={0} depthWrite={false} colorWrite={false}/>
+        </mesh>
+        {showLabel&&<SceneLabel position={[0,2.85,0]} avoidCollisions priority={selected ? 6 : 2} zIndexRange={[32,0]} style={{pointerEvents:'auto'}}>
+          <button type="button" data-no-i18n className={`agent-marker provider-${providerKeyFor(agent.provider) || seat.provider}${selected ? ' is-selected' : ''}`} data-runtime-id={workingRuntimeFor(agent).id} data-agent-id={agent.id} data-agent-status="running" data-provider={agent.provider} style={{'--provider-color':provider.marker}} title={`${displayName} · ${agent.provider} · ${t(officeRoleLabel(agent.role, agent.provider, workingRuntimeFor(agent)))}\n${project} · ${t('Running')}`} aria-label={t('Open {a}, {p}, agent {i}, Running, {r}').replace('{a}', displayName).replace('{p}', agent.provider).replace('{i}', shortId).replace('{r}', project)} onClick={select} onPointerEnter={()=>hoverWorker(agent.id)} onPointerLeave={unhover}><i/><code>{shortId}</code></button>
+        </SceneLabel>}
       </group>
     })}
-    {/* Low sill and translucent windows bring daylight to the back of each room. */}
-    <Block position={[0,.45,-24.7]} size={[78.5,.9,.2]} color="#d5d5c8" />
-    {Array.from({length: 8}, (_, i)=><group key={i}>
-      <mesh position={[-34.2+i*9.75,2.1,-24.7]}><boxGeometry args={[9.35,2.45,.08]} /><meshStandardMaterial color="#b7d4d0" transparent opacity={.55} depthWrite={false} /></mesh>
-      <Block position={[-38.95+i*9.75,2.1,-24.7]} size={[.12,2.55,.2]} color="#f3f2e9" />
-    </group>)}
-    <Block position={[0,3.37,-24.7]} size={[78.5,.12,.2]} color="#f3f2e9" />
-    {floor!==2 && <Block position={[-39.2,.44,4]} size={[.18,.85,57.3]} color="#d4d8cb" />}
-    {floor!==3 && <Block position={[39.2,.44,4]} size={[.18,.85,57.3]} color="#d4d8cb" />}
-    {floor!==1 && <>
-      <Block position={[floor===2 ? -62.4 : 62.4,.44,0]} size={[.18,.85,48]} color="#d4d8cb" />
-      <Block position={[floor===2 ? -51 : 51,.44,-24]} size={[23,.85,.18]} color="#d4d8cb" />
-      <Block position={[floor===2 ? -51 : 51,.44,24]} size={[23,.85,.18]} color="#d4d8cb" />
-    </>}
-    <Furniture floor={floor} />
-    <FrontCommons floor={floor} focus={focus} />
-    <SharedAreas accent={data.accent} onSelectArea={onSelectArea} floor={floor} focus={focus} onFocus={onFocus} />
-    <LocationMarker floor={floor} focus={focus} activeSet={activeSet} />
-    <Crowd floor={floor} onSelectAgent={onSelectAgent} activeSet={activeSet} />
   </group>
 }
 
-function LocationMarker({ floor, focus, activeSet }) {
-  const area = focusArea(floor, focus, activeSet)
-  if (area.type === 'overview') return null
-  if (area.type === 'agent') {
-    const agent = getAgent(floor, area.index)
-    return <group position={[area.x,0,area.z]}>
-      <mesh position={[0,.12,0]} rotation={[-Math.PI/2,0,0]}><ringGeometry args={[.65,.86,40]}/><meshBasicMaterial color="#ffe4a0" side={THREE.DoubleSide}/></mesh>
-      <mesh position={[0,3.5,0]}><coneGeometry args={[.22,.48,8]}/><meshBasicMaterial color="#ffe4a0"/></mesh>
-      <SceneLabel position={[0,4.8,0]} zIndexRange={[25,0]}><div className="agent-beacon"><i/><span>{agent.name}<small>{activeSet.has(area.index) ? 'At assigned desk' : 'In idle room'} · {agent.department}</small></span></div></SceneLabel>
-    </group>
-  }
-  const w = area.width - .5, d = area.depth - .5
-  return <group position={[area.x,.12,area.z]}>
-    {[-1,1].map(sign=><group key={sign}>
-      <Block position={[0,0,sign*d/2]} size={[w,.03,.12]} color="#e7f1c5"/>
-      <Block position={[sign*w/2,0,0]} size={[.12,.03,d]} color="#e7f1c5"/>
-    </group>)}
+function ManagerRoom({ zone, selected, onSelectArea }) {
+  const back=zone.z-zone.depth/2,left=zone.x-zone.width/2,right=zone.x+zone.width/2
+  const meeting=zone.meeting
+  const items=useMemo(()=>[
+    box(zone.x,.65,back,zone.width,1.2,.16,'#293b49'),
+    box(right,.65,zone.z,.16,1.2,zone.depth,'#293b49'),
+    box(left,.65,zone.z,.16,1.2,zone.depth,'#293b49'),
+    ...[left,right].flatMap(x=>[box(x,2.2,back,.06,3.2,.08,BRASS),box(x,2.2,zone.front,.06,3.2,.08,BRASS),box(x,3.8,zone.z,.06,.06,zone.depth,BRASS)]),
+    // One manager workstation is rendered by Workstations; this small table
+    // has only two visitor chairs, with an open path through the room.
+    box(zone.x,3.8,back,zone.width,.07,.08,BRASS),
+    ...[-1,1].flatMap(side=>[
+      box(meeting.x,.57,meeting.z+side*1.75,.95,.18,.85,'#575060'),
+      box(meeting.x,1.06,meeting.z+side*2.12,.94,.86,.15,'#575060'),
+      ...[-1,1].map(arm=>box(meeting.x+arm*.48,.81,meeting.z+side*1.75,.09,.07,.65,INK)),
+      box(meeting.x,.3,meeting.z+side*1.75,.09,.5,.09,BRASS),
+      box(meeting.x,.12,meeting.z+side*1.75,.9,.06,.1,INK),
+      box(meeting.x,.12,meeting.z+side*1.75,.1,.06,.9,INK),
+    ]),
+  ],[zone,meeting,back,left,right])
+  return <group>
+    <Boxes items={items}/>
+    <RoundTable x={meeting.x} z={meeting.z} radius={1.25} height={.9} onClick={()=>onSelectArea?.('management')}/>
+    {[left,right].map(x=><mesh key={x} position={[x,2.25,zone.z]}><boxGeometry args={[.025,2.8,zone.depth]}/><meshStandardMaterial color="#d3c3a6" transparent opacity={.065} depthWrite={false}/></mesh>)}
+    <Sign quietOnMobile selected={selected} position={[zone.x,1.6,zone.front]} onClick={()=>onSelectArea?.('management')}>Dispatch</Sign>
   </group>
 }
 
-function CameraRig({ floor, focus, mode, revision, activeSet }) {
-  const { camera, size } = useThree()
-  const controls = useRef()
-  const flight = useRef(null)
-  const initialized = useRef(false)
-  const area = focusArea(floor, focus, activeSet)
-  useEffect(() => {
-    const target = new THREE.Vector3(area.x, 0, area.z)
-    const direction = mode === 'plan' ? new THREE.Vector3(0,1,.001).normalize() : new THREE.Vector3(.65,.95,1).normalize()
-    const position = target.clone().addScaledVector(direction, 120)
-    const right = new THREE.Vector3().crossVectors(new THREE.Vector3(0,1,0), direction).normalize()
-    const up = new THREE.Vector3().crossVectors(direction, right).normalize()
-    const width = Math.abs(right.x)*area.width + Math.abs(right.z)*area.depth
-    const height = Math.abs(up.x)*area.width + Math.abs(up.z)*area.depth + Math.abs(up.y)*5
-    const zoom = Math.max(.5, Math.min(80, (size.width-48)/width, (size.height-110)/height))
-    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    if (!initialized.current || reducedMotion) {
-      camera.position.copy(position)
-      camera.zoom = zoom
-      camera.lookAt(target)
-      camera.updateProjectionMatrix()
-      controls.current?.target.copy(target)
-      controls.current?.update()
-      flight.current = null
-      initialized.current = true
-    } else flight.current = { target, position, zoom }
-  }, [camera, floor, mode, focus, revision, size.width, size.height, area.x, area.z, area.width, area.depth])
+// Room furniture shares the same instanced batches as the partitions. The warm
+// fixtures are emissive, so each room has lighting without extra shadow passes.
+function roomChair(x, z, angle, fabric, width = 1.5) {
+  return [
+    box(0,.34,0,width,.35,1.4,INK),box(0,.66,0,width,.3,1.4,fabric),
+    box(0,1.15,-.62,width,1.25,.24,fabric),
+    ...[-1,1].flatMap(side=>[
+      box(side*(width/2+.02),.88,0,.18,.35,1.45,fabric),
+      box(side*(width/2-.14),.18,0,.1,.3,1.1,BRASS),
+    ]),
+  ].map(item=>localBox({x,z,angle},item))
+}
 
-  useFrame((_, delta) => {
-    if (!flight.current || !controls.current) return
-    const destination = flight.current
-    const amount = 1 - Math.exp(-7*Math.min(delta,.1))
-    camera.position.lerp(destination.position, amount)
-    controls.current.target.lerp(destination.target, amount)
-    camera.zoom = THREE.MathUtils.lerp(camera.zoom, destination.zoom, amount)
-    camera.updateProjectionMatrix()
-    controls.current.update()
-    if (camera.position.distanceTo(destination.position)<.01 && Math.abs(camera.zoom-destination.zoom)<.01) {
-      camera.position.copy(destination.position)
-      controls.current.target.copy(destination.target)
-      camera.zoom = destination.zoom
-      controls.current.update()
-      camera.updateProjectionMatrix()
-      flight.current = null
-    }
+function RoundTable({ x, z, radius, height = 1, centerpiece = false, onClick }) {
+  return <group position={[x,0,z]} onClick={event=>{event.stopPropagation();onClick?.()}}>
+    <mesh position={[0,height,0]} castShadow receiveShadow><cylinderGeometry args={[radius,radius,.14,48]}/><meshStandardMaterial color="#b2936d" roughness={.7}/></mesh>
+    <mesh position={[0,height/2,0]} castShadow><cylinderGeometry args={[.15,.27,height-.1,16]}/><meshStandardMaterial color={BRASS} roughness={.5}/></mesh>
+    <mesh position={[0,.12,0]} receiveShadow><cylinderGeometry args={[radius*.48,radius*.52,.12,32]}/><meshStandardMaterial color={INK}/></mesh>
+    <mesh position={[0,height+.17,0]}><cylinderGeometry args={[centerpiece ? .38 : .17,centerpiece ? .32 : .14,.2,16]}/><meshStandardMaterial color="#e8dcc4"/></mesh>
+    {centerpiece&&<mesh position={[0,height+.43,0]} scale={[.53,.32,.53]}><icosahedronGeometry args={[1,1]}/><meshStandardMaterial color="#778762" roughness={1}/></mesh>}
+  </group>
+}
+
+function Lounge({ lounge, focus, onFocus }) {
+  const items=useMemo(()=>{
+    const {x,z,width,depth}=lounge
+    const sofa=({x,z,angle,width})=>[
+      box(0,.32,0,width,.42,1.5,'#30555f'),
+      box(0,.62,.12,width-.5,.18,1.1,'#43858a'),
+      box(0,.95,-.6,width,.85,.32,'#30555f'),
+      ...[-1,1].map(side=>box(side*(width/2-.18),.72,0,.36,.48,1.5,'#294953')),
+      ...[-1,1].map(side=>box(side*(width/2-.4),.07,-.5,.12,.14,.12,INK)),
+    ].map(item=>localBox({x,z,angle},item))
+    return [
+      ...lounge.sofas.flatMap(sofa),
+
+    ]
+  },[lounge])
+  return <group>
+    <Boxes items={items} rounded onClick={()=>onFocus?.('lounge')}/>
+    {lounge.tables.map((table,i)=><RoundTable key={i} {...table} height={.65} onClick={()=>onFocus?.('lounge')}/>)}
+    {lounge.plants.map(([px,pz],i)=><Plant key={i} x={px} z={pz} tall={i<4}/>)}
+    <FloorLamp x={lounge.left+1} z={lounge.z}/>
+    <Sign quietOnMobile position={[lounge.x,4.2,lounge.z]} onClick={()=>onFocus?.('lounge')} selected={focus==='lounge'} caption="Sofas · rest area">Lounge & Coffee</Sign>
+  </group>
+}
+
+function Commons({ layout, focus, onFocus, onSelectArea, pendingTaskCount }) {
+  const { reception:coffee, meeting, tasks, reports }=layout.commons
+  const rooms=useMemo(()=>[meeting,tasks,reports],[meeting,tasks,reports])
+  const shell=useMemo(()=>rooms.flatMap(room=>{
+    const {x,z,width,depth,left,right,back,front,doorway,wallHeight}=room
+    const doorLeft=doorway.x-doorway.width/2,doorRight=doorway.x+doorway.width/2
+    return [
+      // Solid screen / cabinet wall, split around a real, unobstructed doorway.
+      box((left+doorLeft)/2,wallHeight/2,back,doorLeft-left,wallHeight,.18,'#293b49'),
+      box((doorRight+right)/2,wallHeight/2,back,right-doorRight,wallHeight,.18,'#293b49'),
+      box(doorway.x,wallHeight-.15,back,doorway.width,.3,.2,WOOD),
+      ...[doorLeft,doorRight].map(dx=>box(dx,wallHeight/2,back,.1,wallHeight,.24,BRASS)),
+      // Low sills and clear glazing keep the room visible from the office view.
+      ...[left,right].flatMap(dx=>[
+        box(dx,.38,z,.16,.7,depth,'#293b49'),
+        box(dx,wallHeight,z,.07,.07,depth,BRASS),
+        ...[back,z,front].map(dz=>box(dx,wallHeight/2,dz,.07,wallHeight,.07,BRASS)),
+      ]),
+      box(x,.38,front,width,.7,.16,'#293b49'),
+      box(x,wallHeight,front,width,.07,.07,BRASS),
+      box(x,wallHeight/2,front,.07,wallHeight,.07,BRASS),
+      // Wall sconces stay on the solid pier, clear of the doorway.
+      ...[left+1.2,right-1.2].flatMap(dx=>[
+        box(dx,3.1,back+.2,.6,.7,.18,BRASS),
+        box(dx,3.1,back+.34,.4,.48,.18,'#e4cfaa'),
+      ]),
+    ]
+  }),[rooms])
+  const glass=useMemo(()=>rooms.flatMap(({x,z,width,depth,left,right,front,wallHeight})=>[
+    ...[left,right].map(dx=>box(dx,(wallHeight+.75)/2,z,.025,wallHeight-.75,depth,'#acdce4')),
+    box(x,(wallHeight+.75)/2,front,width,wallHeight-.75,.025,'#acdce4'),
+  ]),[rooms])
+  const fixtures=useMemo(()=>rooms.flatMap(({left,right,back})=>[left+1.2,right-1.2].map(x=>box(x,3.1,back+.44,.33,.4,.025,'#f1d6a8'))),[rooms])
+  const coffeeItems=useMemo(()=>{
+    const {x,z,width,depth}=coffee
+    return [
+      box(x,.7,z,7,1.35,1.8,WOOD),box(x,1.42,z,width,.12,depth,'#c7b99d'),
+      ...[-2.3,0,2.3].map(dx=>box(x+dx,.78,z-.92,2.15,1.05,.04,'#50392d')),
+      box(x-1.8,1.88,z,1.05,.82,.75,INK),box(x-1.8,2.3,z,1.1,.06,.78,BRASS),box(x-1.8,1.75,z-.4,.7,.34,.04,'#b7a48a'),
+      box(x+1,1.51,z-.1,1.4,.08,.65,'#806443'),box(x+1.4,1.68,z-.1,.22,.25,.22,'#e3d2b4'),box(x+.8,1.68,z-.1,.22,.25,.22,'#d6c6ac'),
+    ]
+  },[coffee])
+  const meetingItems=useMemo(()=>{
+    const {x,z,width,depth}=meeting.table
+    return [
+      box(x,1.07,z,width,.16,depth,WOOD),box(x,.96,z,width-.15,.045,depth-.15,BRASS),
+      ...[-1,1].map(side=>box(x+side*3.8,.53,z,.24,1,depth-1.2,INK)),
+      ...[-1,1].flatMap(side=>[-4.5,-1.5,1.5,4.5].flatMap(dx=>roomChair(x+dx,z+side*3.8,side<0?0:Math.PI,'#68715b'))),
+      ...[-1,1].flatMap(side=>roomChair(x+side*7.5,z,side<0?Math.PI/2:-Math.PI/2,'#68715b')),
+      box(x,1.18,z,2.4,.06,.9,'#a18b70'),
+      ...[-4,4].map(dx=>box(x+dx,1.18,z,.85,.05,.65,'#c4ad87')),
+      box(meeting.x+2,2.35,meeting.back+.19,10.3,2.7,.18,INK),
+      box(meeting.x+2,.65,meeting.back+.55,10.8,.18,.9,WOOD),
+    ]
+  },[meeting])
+  const screen=useMemo(()=>[
+    box(meeting.x+2,2.35,meeting.back+.29,9.9,2.3,.025,'#34403e'),
+    box(meeting.x-.4,2.8,meeting.back+.31,3.8,.09,.025,'#b8a27d'),
+    ...[0,1,2].map(i=>box(meeting.x-.4,2.45-i*.3,meeting.back+.31,3.8-i*.7,.055,.025,'#80ad98')),
+    ...[0,1,2,3].map(i=>box(meeting.x+3.4+i*.65,1.9+i*.15,meeting.back+.31,.35,.35+i*.3,.025,'#80ad98')),
+  ],[meeting])
+  const reportItems=useMemo(()=>{
+    const shelfX=reports.x+2,shelfZ=reports.back+.85,shelfWidth=14
+    return [
+      box(shelfX,1.65,shelfZ-.55,shelfWidth,3.1,.16,WOOD),
+      ...[-7,-2.35,2.35,7].map(dx=>box(shelfX+dx,1.65,shelfZ,.12,3.1,1.3,WOOD)),
+      ...[.25,1.2,2.15,3.2].map(y=>box(shelfX,y,shelfZ,shelfWidth,.1,1.3,WOOD)),
+      ...Array.from({length:27},(_,i)=>box(shelfX-6+(i%9)*1.5,.72+Math.floor(i/9)*.95,shelfZ+.05,.45+(i%3)*.1,.7,.8,['#b8a27d','#55695b','#94755b','#626271','#d4c2a5'][i%5])),
+      // Low report cabinets run along the side wall, leaving the centre open.
+      box(reports.right-1.1,1.05,reports.z-1,1.4,1.9,7.2,WOOD),
+      ...[-3,-1,1].flatMap(dz=>[
+        box(reports.right-1.82,1.05,reports.z+dz, .04,1.6,1.8,'#806443'),
+        box(reports.right-1.86,1.25,reports.z+dz,.06,.08,.45,BRASS),
+      ]),
+      ...roomChair(reports.x+1,reports.z+2,-.2,'#7f876b',2.3),
+      box(reports.x+.5,.5,reports.z+4.3,2.2,.7,1.5,'#68715b'),
+      box(reports.x-3, .65,reports.z+2.2,2,.15,2,WOOD),
+      box(reports.x-3,.33,reports.z+2.2,.18,.6,.18,BRASS),
+      box(reports.x-3,.77,reports.z+2.2,.95,.08,.75,'#d6c09a'),
+    ]
+  },[reports])
+  const boardItems=useMemo(()=>{
+    const x=tasks.x+1.5,z=tasks.back+.25
+    return [
+      box(x,2.05,z,13,3.1,.2,'#4b4e40'),
+      ...[.47,3.63].map(y=>box(x,y,z,13.3,.1,.24,BRASS)),
+      ...[-6.6,6.6].map(dx=>box(x+dx,2.05,z,.1,3.2,.24,BRASS)),
+      ...[-4.3,0,4.3].flatMap((dx,i)=>[
+        box(x+dx,3.12,z+.12,3.5,.18,.025,['#c6ac79','#86a08c','#a798af'][i]),
+        ...[1.25,2.2].flatMap((y,j)=>[-.85,.85].map(sx=>box(x+dx+sx,y,z+.12,1.4,.6,.025,['#c6ac79','#86a08c','#a798af'][(i+j)%3]))),
+      ]),
+      box(x,.43,z+.4,13.3,.12,.7,WOOD),
+      // Supplies stay at the perimeter; the large central standing area is empty.
+      box(tasks.right-1.3,.6,tasks.z+5,1.6,1.05,4,WOOD),
+      box(tasks.right-1.3,1.17,tasks.z+5,1.8,.1,4.2,'#b8a27d'),
+    ]
+  },[tasks])
+  return <group>
+    <Boxes items={shell}/><Boxes items={glass} shadows={false} opacity={.12}/><Boxes items={fixtures} unlit shadows={false}/>
+    <Boxes items={coffeeItems} onClick={()=>onFocus?.('reception')}/>
+    <Boxes items={meetingItems} onClick={()=>onFocus?.('meeting')}/><Boxes items={screen} unlit shadows={false} onClick={()=>onFocus?.('meeting')}/>
+    <Boxes items={reportItems} onClick={()=>onFocus?.('reports')}/><Boxes items={boardItems} onClick={()=>onSelectArea?.('tasks')}/>
+    {rooms.map(room=><FloorLamp key={room.x} x={room.right-2.4} z={room.front-2.4}/>)}
+    <Plant x={meeting.left+2.2} z={meeting.front-2.2}/><Plant x={reports.left+2.2} z={reports.front-2.2}/>
+    <Plant x={coffee.x} z={coffee.z-4}/>
+    <Sign quietOnMobile visible={focus==='reception'} position={[coffee.x,3.8,coffee.z]} onClick={()=>onFocus?.('reception')} selected={focus==='reception'}>Lounge & Coffee</Sign>
+    <Sign quietOnMobile position={[meeting.x,4.4,meeting.z]} onClick={()=>onFocus?.('meeting')} selected={focus==='meeting'} caption="10 seats · wall screen">Meeting room</Sign>
+    <Sign quietOnMobile position={[tasks.x,4.4,tasks.z]} onClick={()=>onSelectArea?.('tasks')} selected={focus==='tasks'} caption={`${pendingTaskCount || 0} to do`}>Task Board</Sign>
+    <Sign quietOnMobile position={[reports.x,4.4,reports.z]} onClick={()=>onFocus?.('reports')} selected={focus==='reports'} caption="Reports & notes">Reports</Sign>
+    {focus==='reports'&&<SceneLabel position={[reports.x,6,reports.z]} style={{pointerEvents:'auto'}}><div className="shared-hub-actions"><button onClick={()=>onSelectArea?.('projects')}>Projects</button><button onClick={()=>onSelectArea?.('reports')}>Reports</button></div></SceneLabel>}
+  </group>
+}
+
+function Architecture({ layout }) {
+  const {bounds}=layout, back=bounds.z-bounds.depth/2,left=bounds.x-bounds.width/2,right=bounds.x+bounds.width/2
+  return <group>
+    <StudioEnvelope layout={layout} Boxes={Boxes}/>
+    <WoodFloor bounds={bounds}/>
+    <ZonePlatforms layout={layout} Boxes={Boxes}/>
+    <StudioDataScreen layout={layout} Boxes={Boxes}/>
+    <StudioSoftFurnishings layout={layout} Boxes={Boxes}/>
+    <Plant x={left+1.1} z={back+1.2} tall/><Plant x={right-1.1} z={back+1.2} tall/>
+    <FloorLamp x={left+1.1} z={8}/><FloorLamp x={right-1.1} z={8}/>
+  </group>
+}
+
+// V8a prototype (flag default off, ?figures=v8a or localStorage
+// office.figuresV8a=1): swaps the primitive crowd for the VAT-skinned
+// Quaternius characters. Lazy, so the chunk and the GLB only ever load with
+// the flag on; the default path is untouched.
+const RealisticPeopleLazy = lazy(() => import('./RealisticPeople.jsx'))
+
+function SharedOffice({ residents, onSelectProvider, layout, focus, onFocus, onSelectAgent, onSelectArea, pendingTaskCount, geminiNeedsLogin = false, meeting = null, ambient = true }) {
+  const [arrived,setArrived]=useState(()=>new Set())
+  const realisticFigures=useMemo(()=>typeof window!=='undefined'&&figuresV8aEnabled({search:window.location.search,storage:window.localStorage}),[])
+  return <group>
+    <Architecture layout={layout}/>
+    {layout.zones.map((zone,index)=><group key={zone.id}>
+      <Sign quietOnMobile position={[zone.x,5.4,zone.z-zone.depth/2+2]} onClick={()=>onFocus?.(`department-${index}`)} selected={focus===`department-${index}`} caption={zone.id==='gemini'&&geminiNeedsLogin?`Sign-in needed · ${zone.deskCount} pods`:`${zone.workingCount} working · ${zone.deskCount} ${zone.deskCount===1?'pod':'pods'}`}>{zone.department}</Sign>
+      {zone.id==='grok'&&<ManagerRoom zone={zone} selected={focus===`department-${index}`} onSelectArea={onSelectArea}/>}
+    </group>)}
+    <Workstations layout={layout} focus={focus} onFocus={onFocus} onSelectAgent={onSelectAgent} onSelectArea={onSelectArea}/>
+    <CentralSocial area={layout.centralSocial} pendingTaskCount={pendingTaskCount} onTasks={()=>onSelectArea?.('tasks')}/>
+    <Lounge lounge={layout.lounge} focus={focus} onFocus={onFocus}/>
+    <Commons pendingTaskCount={pendingTaskCount} layout={layout} focus={focus} onFocus={onFocus} onSelectArea={onSelectArea}/>
+    {realisticFigures
+      ? <Suspense fallback={null}><RealisticPeopleLazy residents={residents} onSelectProvider={onSelectProvider} ambient={ambient} layout={layout} meeting={meeting} onArrived={setArrived} onSelectAgent={onSelectAgent}/></Suspense>
+      : <CharacterSwitch layout={layout} meeting={meeting} onArrived={setArrived} onSelect={onSelectAgent} fallback={<People residents={residents} onSelectProvider={onSelectProvider} ambient={ambient} layout={layout} meeting={meeting} onArrived={setArrived} onSelectAgent={onSelectAgent}/>}/>}
+    <ResidentLabels residents={residents} onSelectProvider={onSelectProvider}/>
+    <WorkingPeople layout={layout} focus={focus} onSelectAgent={onSelectAgent} arrived={arrived}/>
+  </group>
+}
+
+// V5: adaptive quality. Desktops start at the top tier (dpr 2, full motion),
+// phones one tier down (dpr <=1.25, no postprocessing, distant figures
+// throttled). PerformanceMonitor watches the real frame rate against the
+// demand-loop tick: sustained low fps steps the tier down, sustained gesture
+// headroom steps it back up, never above the device's starting ceiling.
+const QualityContext=createContext(qualityTier('balanced'))
+export const useSceneQuality=()=>useContext(QualityContext)
+function AdaptiveQuality({ reducedMotion, children }) {
+  const setDpr=useThree(state=>state.setDpr)
+  const [ceiling]=useState(detectInitialTierId)
+  const [tierId,setTierId]=useState(ceiling)
+  const tier=qualityTier(tierId)
+  useEffect(()=>{setDpr(tierDpr(tier,window.devicePixelRatio||1))},[tier,setDpr])
+  const scene=<QualityContext.Provider value={tier}>{children}</QualityContext.Provider>
+  // Keep the same scene parent when preferences change: remounting would reset
+  // real workers and meetings. The 1Hz reduced-motion loop is not a slow device.
+  return <PerformanceMonitor bounds={()=>reducedMotion?[0,Infinity]:monitorBounds(tier.motionHz)} onDecline={()=>{if(!reducedMotion)setTierId(id=>degradedTierId(id))}} onIncline={()=>{if(!reducedMotion)setTierId(id=>improvedTierId(id,ceiling))}}>{scene}</PerformanceMonitor>
+}
+
+// V7: the Mac-only post pass (see PostEffects.jsx), keyed off the live tier so
+// a mid-session degrade unmounts it and no phone tier ever reaches it. The
+// chunk behind the lazy import only loads once a qualifying tier mounts it.
+const MacPostEffects=lazy(()=>import('./PostEffects.jsx'))
+function PostEffects() {
+  const tier=useSceneQuality()
+  if(!postEffectsEnabled(tier))return null
+  return <OptionalSceneEffects><Suspense fallback={null}><MacPostEffects/></Suspense></OptionalSceneEffects>
+}
+
+// V8a measurement aid: with ?fxstats=1 the renderer's per-frame draw-call and
+// triangle counters are logged every ~2s, so the primitive crowd and the VAT
+// crowd can be compared on the same device (flag off vs ?figures=v8a).
+function SceneStats() {
+  const enabled=useMemo(()=>{try{return new URLSearchParams(window.location.search).get('fxstats')==='1'}catch{return false}},[])
+  const last=useRef(0)
+  useFrame(({gl})=>{
+    if(!enabled)return
+    const now=performance.now()
+    if(now-last.current<2000)return
+    last.current=now
+    console.info(`[fxstats] ${gl.info.render.calls} draw calls, ${gl.info.render.triangles} triangles`)
   })
-  return <OrbitControls ref={controls} makeDefault enablePan enableZoom enableRotate={mode!=='plan'} enableDamping dampingFactor={.12} minZoom={.5} maxZoom={100} maxPolarAngle={Math.PI/2.08} minPolarAngle={.0005} screenSpacePanning onStart={()=>{flight.current=null}} />
+  return null
 }
 
-export default function OfficeScene({ floor = 1, onSelectAgent, onSelectArea, activeAgentIndices = [], focus = 'overview', onFocus, cameraMode = '3d', cameraRevision = 0 }) {
-  const activeSet = useMemo(() => new Set(activeAgentIndices.filter(index => Number.isInteger(index) && index >= 0 && index < COUNT)), [activeAgentIndices])
-  return <Canvas orthographic camera={{ position: [68, 74, 88], zoom: 10, near: .1, far: 500 }} dpr={[1, 1.5]} gl={{ antialias: true, alpha: true }}>
-    <ambientLight intensity={1.25} />
-    <hemisphereLight args={['#fff6df', '#657d75', .65]} />
-    <directionalLight position={[20, 40, 25]} intensity={1.65} />
-    <Suspense fallback={null}><Office floor={Number(floor)} onSelectAgent={onSelectAgent} onSelectArea={onSelectArea} activeSet={activeSet} focus={focus} onFocus={onFocus} /></Suspense>
-    <CameraRig floor={Number(floor)} focus={focus} mode={cameraMode} revision={cameraRevision} activeSet={activeSet}/>
+// Idle rooms render only as needed; working animations have a modest frame budget.
+// OrbitControls and camera flights invalidate independently for fluid gestures.
+function SceneActivity({ active, reducedMotion }) {
+  const invalidate=useThree(state=>state.invalidate)
+  const {motionHz}=useSceneQuality()
+  useEffect(()=>{
+    const timer=window.setInterval(()=>{if(!document.hidden)invalidate()},active&&!reducedMotion ? 1000/motionHz : 1000)
+    return ()=>window.clearInterval(timer)
+  },[active,reducedMotion,motionHz,invalidate])
+  return null
+}
+
+function CameraRig({ layout, focus, mode, revision }) {
+  const {camera,size,invalidate}=useThree(), controls=useRef(), flight=useRef(null), initialized=useRef(false)
+  const area=sharedFocusArea(focus,layout)
+  useEffect(()=>{
+    const target=new THREE.Vector3(area.x,0,area.z)
+    const direction=mode==='plan'?new THREE.Vector3(0,1,.001).normalize():new THREE.Vector3(.55,.82,1).normalize()
+    const distance=Math.max(120,Math.hypot(area.width,area.depth)+20)
+    const position=target.clone().addScaledVector(direction,distance)
+    camera.far=Math.max(500,distance*3)
+    const right=new THREE.Vector3().crossVectors(new THREE.Vector3(0,1,0),direction).normalize()
+    const up=new THREE.Vector3().crossVectors(direction,right).normalize()
+    const width=Math.abs(right.x)*area.width+Math.abs(right.z)*area.depth
+    const height=Math.abs(up.x)*area.width+Math.abs(up.z)*area.depth+Math.abs(up.y)*(area.type==='overview'?11:5)
+    const compact=size.width<600
+    const zoom=Math.max(.5,Math.min(80,(size.width-(compact?28:64))/width,(size.height-120)/height)*(compact?.97:area.type==='overview'?.87:.94))
+    if(!initialized.current||window.matchMedia('(prefers-reduced-motion: reduce)').matches){camera.position.copy(position);camera.zoom=zoom;camera.lookAt(target);camera.updateProjectionMatrix();controls.current?.target.copy(target);controls.current?.update();flight.current=null;initialized.current=true}
+    else flight.current={target,position,zoom}
+    invalidate()
+  },[camera,mode,focus,revision,size.width,size.height,area.x,area.z,area.width,area.depth,invalidate])
+  useFrame((_,delta)=>{
+    if(!flight.current||!controls.current)return
+    const destination=flight.current,amount=1-Math.exp(-7*Math.min(delta,.1))
+    camera.position.lerp(destination.position,amount);controls.current.target.lerp(destination.target,amount);camera.zoom=THREE.MathUtils.lerp(camera.zoom,destination.zoom,amount);camera.updateProjectionMatrix();controls.current.update()
+    if(camera.position.distanceTo(destination.position)<.01&&Math.abs(camera.zoom-destination.zoom)<.01)flight.current=null
+    else invalidate()
+  })
+  return <OrbitControls ref={controls} makeDefault enablePan enableZoom enableRotate={mode!=='plan'} enableDamping dampingFactor={.12} minZoom={.5} maxZoom={100} maxPolarAngle={Math.PI/2.08} minPolarAngle={.0005} screenSpacePanning onStart={()=>{flight.current=null}}/>
+}
+
+function OfficeLighting({ bounds }) {
+  const span=Math.max(64,bounds.width,bounds.depth)
+  const frustum=shadowFrustum(bounds,{ceiling:11})
+  const [mapSize]=useState(detectShadowMapSize)
+  const sun=useRef()
+  const target=useMemo(()=>{
+    const object=new THREE.Object3D()
+    object.position.set(bounds.x,0,bounds.z)
+    return object
+  },[bounds.x,bounds.z])
+  useLayoutEffect(()=>sun.current.shadow.camera.updateProjectionMatrix(),[frustum.x,frustum.y,span])
+  // The HDR environment supplies part of the ambient term, so the constant
+  // lights are dimmer than before it existed.
+  return <>
+    <primitive object={target}/>
+    <ambientLight intensity={.35} color="#e7f1ff"/><hemisphereLight args={['#d5edff','#584632',.8]}/>
+    <directionalLight ref={sun} target={target} position={[bounds.x+span*SUN_OFFSET.x,span*SUN_OFFSET.y,bounds.z+span*SUN_OFFSET.z]} intensity={2.1} color="#ffe2b9" castShadow shadow-bias={-.0004} shadow-normalBias={.045} shadow-mapSize={[mapSize,mapSize]} shadow-camera-left={-frustum.x} shadow-camera-right={frustum.x} shadow-camera-top={frustum.y} shadow-camera-bottom={-frustum.y} shadow-camera-far={span*3}/>
+    <directionalLight position={[15,20,28]} intensity={.65} color="#bddfff"/>
+  </>
+}
+
+const EMPTY_BOARD = {}
+export default function OfficeScene({ residents = [], onSelectProvider, agents = [], board = EMPTY_BOARD, pendingTaskCount = 0, onSelectAgent, onSelectArea, focus = 'overview', onFocus, cameraMode = '3d', cameraRevision = 0, onDeselect }) {
+  const allocations=useMemo(()=>new Map(),[])
+  const layout=useMemo(()=>createSharedLayout(agents,allocations,board),[agents,board,allocations])
+  // First frames already render at the tier's dpr; AdaptiveQuality only re-steps it.
+  const initialDpr=useMemo(()=>tierDpr(qualityTier(detectInitialTierId()),typeof window==='undefined'?1:window.devicePixelRatio||1),[])
+  const [reducedMotion,setReducedMotion]=useState(()=>typeof window!=='undefined'&&window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+  useEffect(()=>{
+    const preference=window.matchMedia('(prefers-reduced-motion: reduce)')
+    const update=()=>setReducedMotion(preference.matches)
+    preference.addEventListener('change',update)
+    return()=>preference.removeEventListener('change',update)
+  },[])
+  return <Canvas onPointerMissed={()=>onDeselect?.()} orthographic shadows="soft" frameloop="demand" camera={{position:[48,62,70],zoom:10,near:.1,far:500}} dpr={initialDpr} gl={{antialias:true,alpha:false,powerPreference:'low-power',toneMapping:THREE.AgXToneMapping}}>
+    <AdaptiveQuality reducedMotion={reducedMotion}>
+      <color attach="background" args={['#091522']}/>
+      <OfficeLighting bounds={layout.bounds}/>
+      {/* Low-res HDR environment: soft reflections and fill light, loaded once. */}
+      <Suspense fallback={null}><Environment files={SCENE_ENV_URL} environmentIntensity={SCENE_ENV_INTENSITY}/></Suspense>
+      <Suspense fallback={null}><SharedOffice residents={residents} onSelectProvider={onSelectProvider} ambient={!reducedMotion} meeting={board?.meeting||null} geminiNeedsLogin={board?.runtime?.providers?.gemini?.needsLogin===true} pendingTaskCount={pendingTaskCount} layout={layout} focus={focus} onFocus={onFocus} onSelectAgent={onSelectAgent} onSelectArea={onSelectArea}/></Suspense>
+      {/* Baked once (frames=1): ambient ground contact under furniture, no per-frame cost.
+          Sits above the carpet pile (.041). The memo
+          boundary takes scalars only so poll/focus rerenders cannot rebake or realloc. */}
+      <BakedContactShadows x={layout.bounds.x} z={layout.bounds.z} width={layout.bounds.width} depth={layout.bounds.depth}/>
+      <CameraRig layout={layout} focus={focus} mode={cameraMode} revision={cameraRevision}/>
+      <PostEffects/>
+      <SceneActivity active reducedMotion={reducedMotion}/>
+      <SceneStats/>
+    </AdaptiveQuality>
   </Canvas>
 }
