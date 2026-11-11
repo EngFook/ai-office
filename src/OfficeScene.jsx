@@ -5,21 +5,16 @@ import { OrbitControls } from '@react-three/drei'
 import SceneLabel from './SceneLabel'
 import { ZONES, seatForIndex, agentPosition, sharedLocations, focusArea } from './office-layout'
 
-const FLOOR_DATA = {
-  1: { provider: 'GPT Codex', accent: '#77b79d', departments: ['Engineering', 'Product', 'Quality', 'Operations'] },
-  2: { provider: 'Claude Code', accent: '#d89b79', departments: ['Research', 'Architecture', 'Code Review', 'Documentation'] },
-  3: { provider: 'Grok', accent: '#a494d0', departments: ['Strategy', 'Insights', 'Creative', 'Innovation'] },
-}
 const COUNT = 200
 const SKINS = ['#e1b59a', '#c68d70', '#a9694d', '#e5c1a3', '#875a48', '#d6a080']
 const HAIR = ['#312822', '#483329', '#231f20', '#75503b', '#51443b']
 const SHIRTS = ['#87a79a', '#c79d83', '#8193a2', '#a799ad', '#d0b59b', '#7d9290', '#b58e83']
 
-function getAgent(floor, index) {
-  const data = FLOOR_DATA[floor] || FLOOR_DATA[1]
-  const department = data.departments[Math.floor(index / 50)]
+// `floor` below is always the layout style (1, 2 or 3); `info` carries the configurable floor details.
+function getAgent(info, index) {
+  const department = info.departments[Math.floor(index / 50)]
   const number = String(index + 1).padStart(3, '0')
-  return { id: `floor-${floor}-agent-${number}`, index, name: `${data.provider} ${number}`, role: department, department, provider: data.provider, floor, status: 'Not connected' }
+  return { id: `floor-${info.id}-agent-${number}`, index, name: `${info.name} ${number}`, role: department, department, provider: info.name, floor: info.id }
 }
 
 function Block({ position, size, color, ...props }) {
@@ -27,7 +22,7 @@ function Block({ position, size, color, ...props }) {
 }
 
 // Each body part is instanced, keeping stable, individually clickable IDs.
-function Crowd({ floor, onSelectAgent, activeSet }) {
+function Crowd({ floor, info, onSelectAgent, activeSet }) {
   const refs = Array.from({ length: 9 }, () => useRef())
   const person = useMemo(() => new THREE.Object3D(), [])
   const color = useMemo(() => new THREE.Color(), [])
@@ -79,7 +74,7 @@ function Crowd({ floor, onSelectAgent, activeSet }) {
   })
   const click = event => {
     event.stopPropagation()
-    if (event.instanceId !== undefined) onSelectAgent?.(getAgent(floor, event.instanceId))
+    if (event.instanceId !== undefined) onSelectAgent?.(getAgent(info, event.instanceId))
   }
   const hover = () => { document.body.style.cursor = 'pointer' }
   const unhover = () => { document.body.style.cursor = 'auto' }
@@ -265,8 +260,8 @@ function FrontCommons({ floor, focus }) {
   </group>
 }
 
-function Office({ floor, onSelectAgent, onSelectArea, activeSet, focus, onFocus }) {
-  const data = FLOOR_DATA[floor] || FLOOR_DATA[1]
+function Office({ floor, info, onSelectAgent, onSelectArea, activeSet, focus, onFocus }) {
+  const data = { accent: info.color, departments: info.departments }
   return <group>
     {/* A 79 × 58 footprint is approximately twice the previous floor area. */}
     <Block position={[0,-.18,4]} size={[79,.35,58]} color="#85664e" />
@@ -322,16 +317,16 @@ function Office({ floor, onSelectAgent, onSelectArea, activeSet, focus, onFocus 
     <Furniture floor={floor} />
     <FrontCommons floor={floor} focus={focus} />
     <SharedAreas accent={data.accent} onSelectArea={onSelectArea} floor={floor} focus={focus} onFocus={onFocus} />
-    <LocationMarker floor={floor} focus={focus} activeSet={activeSet} />
-    <Crowd floor={floor} onSelectAgent={onSelectAgent} activeSet={activeSet} />
+    <LocationMarker floor={floor} info={info} focus={focus} activeSet={activeSet} />
+    <Crowd floor={floor} info={info} onSelectAgent={onSelectAgent} activeSet={activeSet} />
   </group>
 }
 
-function LocationMarker({ floor, focus, activeSet }) {
+function LocationMarker({ floor, info, focus, activeSet }) {
   const area = focusArea(floor, focus, activeSet)
   if (area.type === 'overview') return null
   if (area.type === 'agent') {
-    const agent = getAgent(floor, area.index)
+    const agent = getAgent(info, area.index)
     return <group position={[area.x,0,area.z]}>
       <mesh position={[0,.12,0]} rotation={[-Math.PI/2,0,0]}><ringGeometry args={[.65,.86,40]}/><meshBasicMaterial color="#ffe4a0" side={THREE.DoubleSide}/></mesh>
       <mesh position={[0,3.5,0]}><coneGeometry args={[.22,.48,8]}/><meshBasicMaterial color="#ffe4a0"/></mesh>
@@ -396,13 +391,13 @@ function CameraRig({ floor, focus, mode, revision, activeSet }) {
   return <OrbitControls ref={controls} makeDefault enablePan enableZoom enableRotate={mode!=='plan'} enableDamping dampingFactor={.12} minZoom={.5} maxZoom={100} maxPolarAngle={Math.PI/2.08} minPolarAngle={.0005} screenSpacePanning onStart={()=>{flight.current=null}} />
 }
 
-export default function OfficeScene({ floor = 1, onSelectAgent, onSelectArea, activeAgentIndices = [], focus = 'overview', onFocus, cameraMode = '3d', cameraRevision = 0 }) {
+export default function OfficeScene({ info, layout = 1, onSelectAgent, onSelectArea, activeAgentIndices = [], focus = 'overview', onFocus, cameraMode = '3d', cameraRevision = 0 }) {
   const activeSet = useMemo(() => new Set(activeAgentIndices.filter(index => Number.isInteger(index) && index >= 0 && index < COUNT)), [activeAgentIndices])
   return <Canvas orthographic camera={{ position: [68, 74, 88], zoom: 10, near: .1, far: 500 }} dpr={[1, 1.5]} gl={{ antialias: true, alpha: true }}>
     <ambientLight intensity={1.25} />
     <hemisphereLight args={['#fff6df', '#657d75', .65]} />
     <directionalLight position={[20, 40, 25]} intensity={1.65} />
-    <Suspense fallback={null}><Office floor={Number(floor)} onSelectAgent={onSelectAgent} onSelectArea={onSelectArea} activeSet={activeSet} focus={focus} onFocus={onFocus} /></Suspense>
-    <CameraRig floor={Number(floor)} focus={focus} mode={cameraMode} revision={cameraRevision} activeSet={activeSet}/>
+    <Suspense fallback={null}><Office floor={Number(layout)} info={info} onSelectAgent={onSelectAgent} onSelectArea={onSelectArea} activeSet={activeSet} focus={focus} onFocus={onFocus} /></Suspense>
+    <CameraRig floor={Number(layout)} focus={focus} mode={cameraMode} revision={cameraRevision} activeSet={activeSet}/>
   </Canvas>
 }

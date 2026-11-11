@@ -1,12 +1,6 @@
 import React from 'react'
 import './building-stack.css'
 
-const FLOORS = [
-  { number: 3, name: 'Grok', detail: 'Strategy & exploration', accent: '#b8a6f3' },
-  { number: 2, name: 'Claude Code', detail: 'Research & analysis', accent: '#e5ac88' },
-  { number: 1, name: 'GPT Codex', detail: 'Engineering & execution', accent: '#9ad8b9' },
-]
-
 // An illustrated cutaway keeps every storey visible while the buttons remain
 // ordinary, keyboard-accessible HTML controls.
 function StoreyIllustration({ number }) {
@@ -31,21 +25,23 @@ function StoreyIllustration({ number }) {
     {[['93','43'],['122','38'],['159','34'],['191','40'],['224','46'],['133','53'],['167','48'],['198','54']].map(([x,y]) => <circle key={`${x}-${y}`} cx={x} cy={y} r="1.3" className="building-stack__lamp" />)}
     <polygon className="building-stack__meeting" points="57,50 70,47 82,50 69,53" />
     <circle cx="66" cy="50" r="2.2" className="building-stack__plant" />
-    <text x="251" y="53" className="building-stack__art-number">0{number}</text>
+    <text x="251" y="53" className="building-stack__art-number">{String(number).padStart(2, '0')}</text>
   </svg>
 }
 
-export default function BuildingStack({ floor, onSelectFloor }) {
+export default function BuildingStack({ floor, floors = [], onSelectFloor }) {
+  // Highest floor on top, like a real building.
+  const levels = [...floors].sort((a, b) => b.id - a.id).map(f => ({ number: f.id, name: f.name, detail: f.department, accent: f.color }))
   return <section className="building-stack" aria-label="Office building floor selector">
     <div className="building-stack__heading">
       <div><span className="building-stack__eyebrow">THE BUILDING</span><h2>Choose a floor</h2></div>
-      <span className="building-stack__count">03 FLOORS</span>
+      <span className="building-stack__count">{String(levels.length).padStart(2, '0')} FLOORS</span>
     </div>
     <p className="building-stack__description">Select a level to visit its team.</p>
     <div className="building-stack__drawing">
       <div className="building-stack__roof" aria-hidden="true"><span>AI OFFICE</span></div>
       <div className="building-stack__levels">
-        {FLOORS.map(({ number, name, detail, accent }) => <button
+        {levels.map(({ number, name, detail, accent }) => <button
           type="button"
           key={number}
           className={`building-stack__level${Number(floor) === number ? ' is-selected' : ''}`}
@@ -55,7 +51,7 @@ export default function BuildingStack({ floor, onSelectFloor }) {
           aria-label={`Floor ${number}: ${name}, ${detail}${Number(floor) === number ? ', currently viewing' : ''}`}
         >
           <StoreyIllustration number={number} />
-          <span className="building-stack__name" aria-hidden="true"><b>0{number}</b><span><strong>{name}</strong><small>{detail}</small></span><i>↗</i></span>
+          <span className="building-stack__name" aria-hidden="true"><b>{String(number).padStart(2, '0')}</b><span><strong>{name}</strong><small>{detail}</small></span><i>↗</i></span>
         </button>)}
       </div>
       <div className="building-stack__foundation" aria-hidden="true" />

@@ -17,3 +17,23 @@
 /* Keep the building selector beside the interior, and show it first on mobile. */
 .dashboard-grid{grid-template-areas:'office stack' 'office info';grid-template-rows:auto 1fr;align-items:start}.office-panel{grid-area:office;align-self:start}.stack-column{grid-area:stack;min-width:0}.right-column{grid-area:info}.activity-card{flex:none}
 @media(max-width:960px){.dashboard-grid{grid-template-columns:1fr;grid-template-areas:'stack' 'office' 'info';grid-template-rows:auto}.stack-column{width:100%}}
+
+/* Floors & AI settings */
+.checkbox-row{display:flex!important;align-items:center;gap:9px!important;font-weight:500!important}.dialog .checkbox-row input{width:auto}
+.form-row{display:grid;grid-template-columns:1fr 70px 80px;gap:10px}.form-row--4{grid-template-columns:repeat(2,1fr)}.dialog input[type=color]{padding:3px;height:40px}
+.item-details button:disabled,.primary-button:disabled{opacity:.45;cursor:default}
+.spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+code{font-size:.95em;color:#cfe6da}
+
+/* CEO chat */
+.heading-actions{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+.ceo-floor-picker{display:flex;align-items:center;gap:8px;font-size:10px;color:#93a3b3;font-weight:600}.ceo-floor-picker select{background:#172330;border:1px solid #38495a;color:#dce6e6;border-radius:4px;padding:9px;font-size:11px}
+.ceo-chat{display:flex;flex-direction:column;gap:14px;margin:24px 0 16px;min-height:260px}
+.ceo-empty{display:grid;gap:8px;max-width:720px}.ceo-empty button{display:flex;justify-content:space-between;align-items:center;gap:12px;text-align:left;padding:14px 16px;border:1px dashed #354151;border-radius:7px;background:transparent;color:#c4d0d8;font-size:12px}.ceo-empty button:hover{border-color:#a4cdb8;background:#1b2a32}
+.ceo-msg{max-width:min(820px,92%);padding:14px 17px;border-radius:9px;border:1px solid #293646;background:#111a28}.ceo-msg small{display:block;font-size:8px;letter-spacing:1.3px;font-weight:700;color:#8fa1b2;margin-bottom:7px}.ceo-msg p{font-size:12.5px;line-height:1.65;color:#d9e2e8;white-space:pre-wrap;overflow-wrap:anywhere}
+.ceo-msg--user{align-self:flex-end;background:#1d3330;border-color:#36574f}.ceo-msg.is-error{border-color:#6b3d3a}.ceo-msg.is-error p{color:#efad9e}
+.ceo-plan{margin-top:14px;display:grid;gap:8px}.ceo-task{display:flex;gap:12px;justify-content:space-between;padding:11px 12px;border-radius:6px;background:#172231;border-left:3px solid var(--accent)}.ceo-task-main{min-width:0}.ceo-task-main strong{font-size:12px}.ceo-task-main p{font-size:11px;color:#9ba8b6;margin-top:4px}.ceo-task-main small{color:#a9dac1;margin:4px 0 0;letter-spacing:0;font-weight:400}
+.ceo-task-edit{display:flex;gap:6px;align-items:flex-start;flex:none}.ceo-task-edit select{background:#0f1926;border:1px solid #38495a;color:#dce6e6;border-radius:4px;padding:6px;font-size:10px;max-width:130px}
+.ceo-task-status{flex:none;text-align:right;font-size:10px;color:#93a3b3;line-height:1.7}.ceo-task-status b{color:#a9dac1}.ceo-task-status b.is-error{color:#efad9e}.ceo-plan-note{color:#93bca8!important;letter-spacing:.5px!important}
+.ceo-input{display:flex;gap:10px;align-items:flex-end;position:sticky;bottom:12px;padding:12px;background:#101827;border:1px solid #2f3d4e;border-radius:9px}.ceo-input textarea{flex:1;resize:vertical;border:0;background:transparent;color:#edf3f1;font-size:13px;outline:none}
+@media (max-width:700px){.ceo-task{flex-direction:column}.ceo-task-status{text-align:left}.heading-actions{width:100%}}
