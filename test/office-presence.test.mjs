@@ -16,7 +16,7 @@ test('Bot figures require observed local heartbeats and working status expires',
 
 test('Task runner native session merges once and retains its assigned support role',()=>{
   const connection={connected:true,agents:[{id:'native-1',sessionId:'session-1',name:'Codex',status:'idle',isSubagent:false}]};
-  const runtime={agents:[{id:'session-1',sessionId:'session-1',provider:'Codex',status:'working',agentType:'office-task-runner',role:'Tester',isSubagent:false,observed:true}]};
+  const runtime={started:true,running:[{taskId:'actual-task',provider:'codex',sessionId:'session-1',workerId:'runner'}],agents:[{taskId:'actual-task',id:'session-1',sessionId:'session-1',provider:'Codex',status:'working',agentType:'office-task-runner',role:'Tester',isSubagent:false,observed:true}]};
   const merged=withTaskWorkers(connection,runtime,'Codex');
   assert.equal(merged.agents.length,1);assert.equal(merged.agents[0].id,'native-1');
   const roster=buildSharedRoster({codex:merged});assert.equal(roster[0].role,'Tester');assert.equal(roster[0].liveStatus,'working');

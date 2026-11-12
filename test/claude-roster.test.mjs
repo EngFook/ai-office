@@ -40,18 +40,18 @@ test('new workers do not move existing seats and finished seats can be reused', 
   assert.equal(third.find(agent=>agent.id==='claude-live-d').index,150);
 });
 test('running filter excludes waiting, idle and offline workers', () => {
-  const roster = buildClaudeRoster(skills,[{id:'a',status:'working'}, {id:'b',status:'waiting'}, {id:'c',status:'idle'}, {id:'d',status:'offline'}]);
+  const roster = buildClaudeRoster(skills,[{id:'a',status:'working',observed:true,executionState:'working'}, {id:'b',status:'waiting',observed:true,executionState:'waiting'}, {id:'c',status:'idle',observed:true,executionState:'idle'}, {id:'d',status:'offline',observed:true,executionState:'offline'}]);
   assert.deepEqual(runningClaudeAgents(roster).map(agent=>agent.runtimeAgents[0].id),['a']);
-  assert.equal(runningClaudeAgents(buildClaudeRoster(skills,[{id:'a',status:'working'}],false)).length,0);
+  assert.equal(runningClaudeAgents(buildClaudeRoster(skills,[{id:'a',status:'working',observed:true,executionState:'working'}],false)).length,0);
 });
 test('each observed worker appears in exactly one explicit status group', () => {
-  const roster = buildClaudeRoster(skills,[{id:'a',status:'working'}, {id:'b',status:'idle'}, {id:'c',status:'waiting'}]);
+  const roster = buildClaudeRoster(skills,[{id:'a',status:'working',observed:true,executionState:'working'}, {id:'b',status:'idle',observed:true,executionState:'idle'}, {id:'c',status:'waiting',observed:true,executionState:'waiting'}]);
   const groups = claudeWorkerGroups(roster);
   assert.deepEqual(groups.running.map(agent=>agent.runtimeAgents[0].id),['a']);
   assert.deepEqual(groups.idle.map(agent=>agent.runtimeAgents[0].id),['b']);
   assert.deepEqual(groups.waiting.map(agent=>agent.runtimeAgents[0].id),['c']);
   assert.equal(Object.values(groups).flat().length,3);
-  const finished = buildClaudeRoster(skills,[{id:'a',status:'idle'}]);
+  const finished = buildClaudeRoster(skills,[{id:'a',status:'idle',observed:true,executionState:'idle'}]);
   assert.equal(claudeWorkerGroups(finished).running.length,0);
   assert.equal(claudeWorkerGroups(finished).idle.length,1);
   assert.equal(claudeAgentStatus(resolveClaudeSelection([],roster.find(agent=>agent.runtimeAgents[0]?.id==='a'))).label,'Offline');

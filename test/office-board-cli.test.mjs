@@ -103,3 +103,42 @@ test('office-board explicit claim targets the chosen card and validates its id b
     await assert.rejects(runOfficeBoardCommand({ args, environment: {}, fetchImpl }), /requires one/);
   assert.equal(calls.length, count);
 });
+test('agent-heartbeat uses the configured office endpoint and the normal CSRF handshake', async () => {
+  const {fetchImpl,calls}=fixture();
+  const input={id:'child',provider:'gemini',sessionId:'session',parentAgentId:'root',isSubagent:true,status:'working'};
+  await runOfficeBoardCommand({args:['agent-heartbeat'],environment:{AI_OFFICE_URL:'http://127.0.0.1:4180'},fetchImpl,readInput:async()=>input});
+  assert.equal(calls[1].url,'http://127.0.0.1:4180/api/office/agents/heartbeat');
+  assert.equal(calls[1].options.headers['X-Office-Token'],'request-token');
+  assert.deepEqual(JSON.parse(calls[1].options.body),input);
+});
+
+
+test('pending-reports reads the dedicated local inbox without leaking board tokens or launching a write', async () => {
+  const calls = [], result = { reports: [{ id: 'qwen-daily:2026-11-12', reportHash: 'a'.repeat(64), text: 'Complete report.' }] };
+  const read = await runOfficeBoardCommand({ args: ['pending-reports'], environment: { AI_OFFICE_URL: 'http://127.0.0.1:5199' },
+    fetchImpl: async (url, options) => { calls.push({ url, options }); return new Response(JSON.stringify(result)); },
+    readInput: async () => { throw new Error('No stdin for a read-only report listing'); } });
+  assert.deepEqual(read, result); assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'http://127.0.0.1:5199/api/office/daily-reports/pending');
+  assert.equal(calls[0].options.method, 'GET'); assert.equal(calls[0].options.body, undefined);
+});
+
+test('acknowledge-report requires an actual message receipt and posts structured JSON with the local CSRF token', async () => {
+  const { calls, fetchImpl } = fixture();
+  const input = { source: 'grok-bot', reportHash: 'f'.repeat(64), messageId: 'bot-delivery-actual-123' };
+  await runOfficeBoardCommand({ args: ['acknowledge-report', 'qwen-daily:2026-11-12', '--port', '5199'], environment: {}, fetchImpl, readInput: async () => input });
+  assert.equal(calls[1].url, 'http://127.0.0.1:5199/api/office/daily-reports/qwen-daily%3A2026-11-12/acknowledge');
+  assert.equal(calls[1].options.headers.Origin, 'http://127.0.0.1:5199');
+  assert.equal(calls[1].options.headers['X-Office-Token'], 'request-token');
+  assert.deepEqual(JSON.parse(calls[1].options.body), input);
+  for (const invalid of [{ ...input, source: 'user' }, { ...input, reportHash: '' }, { ...input, messageId: '' }, { ...input, messageId: ' \n' }, { ...input, messageId: 'a'.repeat(241) }]) {
+    const before = calls.length;
+    await assert.rejects(runOfficeBoardCommand({ args: ['acknowledge-report', 'report-1'], environment: {}, fetchImpl, readInput: async () => invalid }), /actual delivered messageId/);
+    assert.equal(calls.length, before + 1, 'invalid receipts never POST to the local office');
+  }
+  const before = calls.length;
+  for (const args of [['acknowledge-report'], ['acknowledge-report', 'bad?id'], ['pending-reports', 'unexpected']]) {
+    await assert.rejects(runOfficeBoardCommand({ args, environment: {}, fetchImpl }), /requires one|does not accept/);
+  }
+  assert.equal(calls.length, before, 'invalid arguments are rejected before network access');
+});

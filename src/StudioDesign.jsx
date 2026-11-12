@@ -2,7 +2,7 @@ import React, { useEffect, useMemo } from 'react'
 import * as THREE from 'three'
 
 const b = (x,y,z,w,h,d,color,angle=0) => ({x,y,z,w,h,d,color,angle})
-export const STUDIO_ACCENTS = { claude:'#9955ff', codex:'#28e996', grok:'#f7a431', reviewers:'#ef4a9d', gemini:'#279cf4', 'local-qwen':'#bfc52c', overflow:'#9baeff' }
+export const STUDIO_ACCENTS = { claude:'#9955ff', codex:'#28e996', grok:'#f7a431', reviewers:'#f7a431', gemini:'#279cf4', 'local-qwen':'#bfc52c', overflow:'#9baeff' }
 
 function useCanvasTexture(draw, dependencies) {
   const texture = useMemo(() => {
@@ -83,7 +83,8 @@ export function ZonePlatforms({ layout, Boxes }) {
     const bases=[],edges=[]
     for(const zone of layout.zones) {
       const tint=STUDIO_ACCENTS[zone.id]||STUDIO_ACCENTS.overflow
-      bases.push(b(zone.x,.039,zone.z,zone.width-.5,.009,zone.depth-.5,'#202c3e'))
+      // Keep the shared white carpet visible through every department.
+      // The coloured perimeter identifies the team without a dark floor overlay.
       const x=zone.x,z=zone.z,w=zone.width-.65,d=zone.depth-.65
       edges.push(b(x,.065,z-d/2,w,.035,.09,tint),b(x,.065,z+d/2,w,.035,.09,tint),b(x-w/2,.065,z,.09,.035,d,tint),b(x+w/2,.065,z,.09,.035,d,tint))
       // Inset corner ticks give the platforms a finished metal trim.
@@ -137,8 +138,7 @@ export function StudioSoftFurnishings({ layout, Boxes }) {
     ...[-2.7,-1.8,-.9,1,1.8,2.6].map((dx,i)=>b(coffee.x+dx,3.65,coffee.z+.65,.35,.55,.36,['#c0d0be','#dab67a','#a3b5bf'][i%3])),
     b(coffee.x,5.4,coffee.z,6.8,.1,.12,'#283a44'),
     ...[-2.4,0,2.4].flatMap(dx=>[b(coffee.x+dx,4.8,coffee.z,.04,1.1,.04,'#bfab7f'),b(coffee.x+dx,4.2,coffee.z,.7,.18,.7,'#d7c19b')]),
-    // Low upholstered benches and a pale stone floor distinguish the glazed commons.
-    ...[meeting,tasks,reports].map(room=>b(room.x,.039,room.z,room.width-.25,.009,room.depth-.25,'#77838a')),
+    // Glazed commons share the same carpet and walking height as the office.
   ],[lounge,coffee,meeting,tasks,reports])
   const light=useMemo(()=>[
     b(coffee.x,3.2,coffee.z+.3,6.4,.045,.07,'#ffe0a6'),

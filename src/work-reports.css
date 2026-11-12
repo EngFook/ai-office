@@ -1,11 +1,51 @@
 .work-reports { margin: 0 0 30px; }
 .work-reports__note, .work-reports small { color: var(--muted, #65736c); font-size: 12px; font-weight: 400; }
-.work-reports__provider { border: 1px solid var(--border, #dce5dd); border-radius: 12px; padding: 16px; margin: 14px 0; background: var(--surface, #fff); }
+/* Report cards use a paired foreground/background palette. The app shell has
+   light text and --muted for dark surfaces, which must not leak onto white cards. */
+.work-reports__provider {
+  --report-surface: #fff;
+  --report-text: #24382d;
+  --report-muted: #4d6256;
+  --report-border: #cbd8cf;
+  --report-code-surface: #f0f5f1;
+  --report-accent: #397651;
+  border: 1px solid var(--report-border);
+  border-radius: 12px;
+  padding: 16px;
+  margin: 14px 0;
+  background: var(--report-surface);
+  color: var(--report-text);
+}
 .work-reports__provider h3 { margin: 0 0 12px; }
-.work-reports__task { border-top: 1px solid var(--border, #dce5dd); padding: 12px 0; overflow-wrap: anywhere; }
+.work-reports__task { border-top: 1px solid var(--report-border, #cbd8cf); padding: 12px 0; overflow-wrap: anywhere; }
 .work-reports__task summary { cursor: pointer; line-height: 1.6; }
 .work-reports__task h4 { margin: 16px 0 6px; }
-.work-reports__task blockquote { margin: 8px 0; border-left: 3px solid #b7dfc9; padding-left: 12px; white-space: pre-wrap; font-size: 13px; line-height: 1.7; }
+.work-reports__task blockquote { margin: 8px 0; border-left: 3px solid var(--report-accent, #397651); padding-left: 12px; white-space: pre-wrap; font-size: 13px; line-height: 1.7; }
 .work-reports__task pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; max-height: 360px; overflow: auto; }
 .work-reports__task code { font-size: 12px; }
 @media (max-width: 600px) { .work-reports .list-header { flex-direction: column; align-items: flex-start; gap: 8px; } }
+
+.work-reports__live{--report-surface:#14221d;--report-text:#e3ece6;--report-muted:#b7c9bc;--report-border:#3d554a;--report-code-surface:#1c3026;--report-accent:#a3d6b5;margin:16px 0;padding:16px;border:1px solid var(--report-border);border-radius:12px;background:var(--report-surface);color:var(--report-text)}.work-reports__live h3{margin:0 0 10px}.work-reports__live p,.work-reports__live li{font-size:12px;line-height:1.65}.work-reports__live summary{cursor:pointer;font-size:12px;margin-top:12px}.work-reports__summary{white-space:pre-wrap}.work-reports__logs{max-height:320px;overflow:auto;margin-top:10px}.work-reports__logs>div{padding:9px 0;border-top:1px solid var(--border,#3d554a);font-size:11px;overflow-wrap:anywhere}.work-reports__logs strong,.work-reports__logs span{display:block}.work-reports__logs span{margin:4px 0}.work-reports__logs code{font-size:10px}
+
+/* Scoped selectors also win over shared heading, label and code styling. */
+.work-reports :is(.work-reports__provider, .work-reports__live) :is(h3, h4, summary, label, p, pre, code, blockquote, li, strong, span) {
+  color: var(--report-text);
+}
+.work-reports :is(.work-reports__provider, .work-reports__live) :is(small, .work-reports__note) {
+  color: var(--report-muted);
+  opacity: 1;
+}
+.work-reports :is(.work-reports__provider, .work-reports__live) pre {
+  background: var(--report-code-surface);
+  border: 1px solid var(--report-border);
+  border-radius: 6px;
+  padding: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 360px;
+  overflow: auto;
+}
+.work-reports :is(.work-reports__provider, .work-reports__live) summary:focus-visible {
+  outline: 2px solid var(--report-accent);
+  outline-offset: 4px;
+}

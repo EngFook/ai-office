@@ -55,7 +55,7 @@ function frontmatterValue(source, key) {
 }
 
 async function installedSkills(claudeDir, settings) {
-  if (settings.enabledPlugins?.[PLUGIN_KEY] !== true) throw new Error(`Enable ${PLUGIN_KEY} in Claude Code before connecting AI Office.`);
+  if (settings.enabledPlugins?.[PLUGIN_KEY] !== true) return { root: null, version: null, skills: [] };
   const registryFile = path.join(claudeDir, 'plugins', 'installed_plugins.json');
   const registry = parseObject(await readFile(registryFile, 'utf8'), registryFile);
   const versions = registry.plugins?.[PLUGIN_KEY];
@@ -178,7 +178,7 @@ export async function connectClaude({ claudeDir = process.env.CLAUDE_CONFIG_DIR 
     for (const entry of changes) await atomicWrite(entry.file, entry.content);
   }
   await mkdir(path.join(officeDir, 'events'), { recursive: true, mode: 0o700 });
-  return { changedFiles: changes.length, specialists: topics.length, router: 'ai-office-gamedev-router', hookPath, eventsDirectory: path.join(officeDir, 'events'), backupDirectory, pluginRoot: catalog.root, pluginVersion: catalog.version };
+  return { changedFiles: changes.length, specialists: topics.length, router: catalog.skills.some(skill => skill.name === 'router') ? 'ai-office-gamedev-router' : null, hookPath, eventsDirectory: path.join(officeDir, 'events'), backupDirectory, pluginRoot: catalog.root, pluginVersion: catalog.version };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

@@ -6,6 +6,8 @@ import { constants } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { workerEnvironment } from './worker-environment.mjs';
+import { createCodexWorkspaceReader } from './codex-workspace.mjs';
+import { compactNativeStatus } from './native-status-view.mjs';
 
 const execute = promisify(execFile);
 const TAIL_BYTES = 4 * 1024 * 1024;
@@ -58,8 +60,9 @@ async function lockOwners(codexHome) {
   return { owners: new Map(), available: false };
 }
 
-export function readThreadMetadata(codexHome, loadedIds = []) {
+export function readThreadMetadata(codexHome, loadedIds = [], health = {}) {
   let database;
+  health.available = false;
   try {
     database = new DatabaseSync(path.join(codexHome, 'state_5.sqlite'), { readOnly: true });
     const columns = new Set(database.prepare('PRAGMA table_info(threads)').all().map(row => row.name));
@@ -67,12 +70,13 @@ export function readThreadMetadata(codexHome, loadedIds = []) {
     // Deliberately exclude title, preview, first_user_message, policies, and auth.
     const selection = COLUMNS.map(column => columns.has(column) ? column : `NULL AS ${column}`).join(', ');
     const rows = database.prepare(`SELECT ${selection} FROM threads ORDER BY ${columns.has('updated_at') ? 'updated_at' : 'id'} DESC LIMIT 128`).all();
-    for (const id of loadedIds.slice(0, 256)) {
+    for (const id of new Set(loadedIds)) {
       if (!rows.some(row => row.id === id)) {
         const row = database.prepare(`SELECT ${selection} FROM threads WHERE id = ?`).get(id);
         if (row) rows.push(row);
       }
     }
+    health.available = true;
     return rows;
   } catch { return []; }
   finally { database?.close(); }
@@ -146,18 +150,19 @@ export function reduceCodexEvents(events, previous) {
 }
 
 async function rolloutState(file, codexHome, cache) {
+  const unavailable = () => ({ ...reduceCodexEvents([]), sourceAvailable: false });
   const safePath = cwd(file);
   const relative = path.relative(codexHome, safePath);
-  if (!safePath || relative.startsWith('..') || path.isAbsolute(relative) || !['sessions', 'archived_sessions'].includes(relative.split(path.sep)[0])) return reduceCodexEvents([]);
+  if (!safePath || relative.startsWith('..') || path.isAbsolute(relative) || !['sessions', 'archived_sessions'].includes(relative.split(path.sep)[0])) return unavailable();
   let handle;
   try {
     const actual = await realpath(safePath);
     const actualHome = await realpath(codexHome);
     const actualRelative = path.relative(actualHome, actual);
-    if (actualRelative.startsWith('..') || path.isAbsolute(actualRelative) || !['sessions', 'archived_sessions'].includes(actualRelative.split(path.sep)[0])) return reduceCodexEvents([]);
+    if (actualRelative.startsWith('..') || path.isAbsolute(actualRelative) || !['sessions', 'archived_sessions'].includes(actualRelative.split(path.sep)[0])) return unavailable();
     handle = await open(safePath, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
     const stat = await handle.stat();
-    if (!stat.isFile()) return reduceCodexEvents([]);
+    if (!stat.isFile()) return unavailable();
     const old = cache.get(safePath);
     if (old?.size === stat.size && old.mtime === stat.mtimeMs) return old.state;
     const append = old && stat.size >= old.size && stat.size - old.offset <= TAIL_BYTES;
@@ -174,11 +179,11 @@ async function rolloutState(file, codexHome, cache) {
       if (!/"type"\s*:\s*"(?:event_msg|response_item)"/.test(line.slice(0, 240))) continue;
       try { const event = sanitizeCodexRecord(JSON.parse(line)); if (event) events.push(event); } catch { /* partial/unrecognized record */ }
     }
-    const state = reduceCodexEvents(events, append ? old.state : undefined);
+    const state = { ...reduceCodexEvents(events, append ? old.state : undefined), sourceAvailable: true };
     // Cache only sanitized state and byte offsets, never raw rollout lines.
     cache.set(safePath, { state, size: stat.size, mtime: stat.mtimeMs, offset: last >= 0 ? offset + Buffer.byteLength(text.slice(0, last + 1)) : offset });
     return state;
-  } catch { return reduceCodexEvents([]); }
+  } catch { return unavailable(); }
   finally { await handle?.close(); }
 }
 
@@ -242,7 +247,14 @@ export async function discoverCodexSkills({ codexHome = defaultHome(), agentsHom
 
 export async function readCodexStatus({ codexHome = defaultHome(), agentsHome, owners, cache = new Map() } = {}) {
   const lockState = owners ? { owners, available: true } : await lockOwners(codexHome);
-  const [skills, rows] = await Promise.all([discoverCodexSkills({ codexHome, agentsHome }), Promise.resolve(readThreadMetadata(codexHome, [...lockState.owners.keys()]))]);
+  const metadataHealth = {};
+  const [skills, rows] = await Promise.all([discoverCodexSkills({ codexHome, agentsHome }), Promise.resolve(readThreadMetadata(codexHome, [...lockState.owners.keys()], metadataHealth))]);
+  // Catalog insertion can lag behind a newly held writer lock. That one
+  // unknown identity must not erase independent, readable running sessions.
+  const rowIds = new Set(rows.map(row => row.id));
+  const missingThreadIds = [...lockState.owners.keys()].filter(id => !rowIds.has(id));
+  const metadataAvailable = lockState.available && metadataHealth.available;
+  const catalogComplete = metadataAvailable && missingThreadIds.length === 0;
   const agents = [];
   for (const row of rows) {
     const id = identifier(row.id);
@@ -259,13 +271,18 @@ export async function readCodexStatus({ codexHome = defaultHome(), agentsHome, o
     const agentType = agentRole || clean(agentPath.split('/').pop()) || 'main';
     const name = clean(row.agent_nickname || spawn?.agent_nickname) || (isSubagent ? `Codex ${agentType}` : 'Codex coordinator');
     const state = loaded ? await rolloutState(row.rollout_path, codexHome, cache) : cache.get(`agent:${id}`)?.state || reduceCodexEvents([]);
-    const { calls, activeTurn, ...activity } = state;
+    const { calls, activeTurn, sourceAvailable, ...activity } = state;
     const updatedAt = state.updatedAt || iso(row.updated_at_ms || row.updated_at * 1000);
-    agents.push({ id, sessionId: id, agentType, agentRole: agentRole || null, agentPath: agentPath || null, name, ...activity, status: loaded ? state.status : 'offline', tool: loaded ? state.tool : null, cwd: cwd(row.cwd), updatedAt, isSubagent, parentSessionId: identifier(spawn?.parent_thread_id) || null });
+    agents.push({ id, agentId: id, parentAgentId: identifier(spawn?.parent_thread_id) || null, sessionId: id, agentType, agentRole: agentRole || null, agentPath: agentPath || null, name, ...activity, status: loaded ? state.status : 'offline', executionState: !loaded ? 'offline' : !sourceAvailable || !state.observed ? 'unconfirmed' : state.status, observationSource: 'codex-writer-lock-and-turn-events', threadMetadataAvailable: true, lifecycleSourceAvailable: sourceAvailable === true, activityPhase: !state.observed ? 'session-detected' : state.tool ? 'tool-pending' : state.status === 'working' ? 'between-hooks' : state.status, lastEventAt: state.updatedAt, tool: loaded ? state.tool : null, cwd: cwd(row.cwd), updatedAt, isSubagent, parentSessionId: identifier(spawn?.parent_thread_id) || null });
     cache.set(`agent:${id}`, { state });
   }
+  if (metadataAvailable) for (const rawId of missingThreadIds) {
+    const id = identifier(rawId);
+    if (!id) continue;
+    agents.push({ id, agentId: id, sessionId: id, parentAgentId: null, parentSessionId: null, agentType: 'unknown', agentRole: null, agentPath: null, name: 'Codex session', status: 'unconfirmed', executionState: 'unconfirmed', observed: false, observationSource: 'codex-writer-lock-only', threadMetadataAvailable: false, lifecycleSourceAvailable: false, activityPhase: 'metadata-pending', lastEvent: 'MetadataPending', lastEventAt: null, updatedAt: null, tool: null, lastTool: null, lastToolAt: null, lastToolOutcome: null, cwd: '', isSubagent: null });
+  }
   const updatedAt = agents.map(agent => agent.updatedAt).filter(Boolean).sort().at(-1) || null;
-  return { connected: agents.some(agent => agent.status !== 'offline'), source: 'Codex local writer locks and lifecycle metadata', metadataAvailable: lockState.available, updatedAt, lastEventAt: updatedAt, liveAgentCount: agents.filter(agent => agent.status !== 'offline').length, agents, skills, privacy: 'Only thread identity, writer-lock liveness, lifecycle types and tool names are exposed. Prompts, messages, reasoning, arguments, results and authentication are excluded.' };
+  return { observedAt: new Date().toISOString(), sourceHealth: { writerLocks: lockState.available, threadMetadata: metadataHealth.available, missingThreadRecords: missingThreadIds.length, catalogComplete, unreadableRollouts: agents.filter(agent => agent.status !== 'offline' && agent.threadMetadataAvailable !== false && !agent.lifecycleSourceAvailable).length }, catalogComplete, coverage: 'Held writer locks and persisted turn lifecycle; missing thread records or unreadable lifecycle remain individually unconfirmed without hiding readable sessions.', connected: metadataAvailable && agents.some(agent => agent.status !== 'offline'), source: 'Codex local writer locks and lifecycle metadata', metadataAvailable, updatedAt, lastEventAt: updatedAt, liveAgentCount: agents.filter(agent => agent.status !== 'offline').length, agents, skills, privacy: 'Only thread identity, writer-lock liveness, lifecycle types and tool names are exposed. Prompts, messages, reasoning, arguments, results and authentication are excluded.' };
 }
 
 function allowed(request) {
@@ -279,20 +296,30 @@ function allowed(request) {
 
 export function codexBridge(options = {}) {
   const cache = new Map();
+  const codexHome = options.codexHome || defaultHome();
+  const readWorkspace = createCodexWorkspaceReader({ codexHome });
   let last = null, refreshedAt = 0, pending = null;
   const middleware = async (request, response, next) => {
-    if (request.url?.split('?')[0] !== '/api/codex/status') return next();
+    const endpoint = request.url?.split('?')[0];
+    if (!['/api/codex/status', '/api/codex/workspace'].includes(endpoint)) return next();
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.setHeader('X-Content-Type-Options', 'nosniff');
     if (!allowed(request)) { response.statusCode = 403; response.end('{"error":"Local same-origin access only"}'); return; }
     if (request.method !== 'GET') { response.statusCode = 405; response.setHeader('Allow', 'GET'); response.end('{"error":"Read-only endpoint"}'); return; }
+    const agentsView = endpoint === '/api/codex/status' && new URL(request.url, 'http://localhost').searchParams.get('view') === 'agents';
+    if (options.enabled === false) {
+      const value = { connected: false, enabled: false, agents: [], skills: [], error: null };
+      response.end(JSON.stringify(agentsView ? compactNativeStatus(value) : value));
+      return;
+    }
     try {
       if (!last || Date.now() - refreshedAt > 1000) {
         pending ||= readCodexStatus({ ...options, cache }).then(value => { last = value; refreshedAt = Date.now(); }).finally(() => { pending = null; });
         await pending;
       }
-      response.end(JSON.stringify(last));
+      const value = endpoint === '/api/codex/workspace' ? await readWorkspace(last, readThreadMetadata(codexHome, last.agents.map(agent => agent.id))) : last;
+      response.end(JSON.stringify(agentsView ? compactNativeStatus(value) : value));
     } catch { response.statusCode = 500; response.end('{"error":"Codex activity is temporarily unavailable"}'); }
   };
   return { name: 'ai-office-codex-bridge', configureServer(server) { server.middlewares.use(middleware); }, configurePreviewServer(server) { server.middlewares.use(middleware); } };

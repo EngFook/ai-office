@@ -74,6 +74,7 @@ async function main() {
     sessionId,
     agentId: identifier(raw.agent_id),
     agentType: identifier(raw.agent_type),
+    parentAgentId: identifier(raw.parent_agent_id),
     cwd: cleanCwd(raw.cwd),
     tool,
     skill: tool === 'Skill' ? identifier(raw.tool_input?.skill) : undefined,

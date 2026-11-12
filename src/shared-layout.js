@@ -1,3 +1,4 @@
+import { isConfirmedExecution, officeExecutionCounts, officeRuntimeWorkers } from './claude-execution.js'
 import { CENTRAL_SOCIAL } from './central-social.js'
 export const SHARED_DEPARTMENTS = ['Claude Build Studio', 'Codex Review & Balance', 'Grok Dispatch', 'Gemini Research', 'Qwen Local Assistance']
 export const OFFICE_PROVIDERS = {
@@ -7,8 +8,8 @@ export const OFFICE_PROVIDERS = {
   grok: { name: 'Grok', department: SHARED_DEPARTMENTS[2], color: '#a598c1', marker: '#c4b3e2' },
   gemini: { name: 'Gemini', department: SHARED_DEPARTMENTS[3], color: '#8fa9d6', marker: '#b3c8ee' },
 }
-export const REVIEWER_ROLES = ['Playtester', 'UX/UI Reviewer', 'Performance Engineer', 'Code Reviewer']
-export const WORKSTATION_COUNTS = { claude: 20, codex: 6, reviewers: 4, grok: 1, gemini: 4, 'local-qwen': 2 }
+export const GROK_UNBLOCKING_ROLES = ['Blocker Triage', 'Recovery Coordination', 'Information Follow-up', 'Recovery Verification']
+export const WORKSTATION_COUNTS = { claude: 20, codex: 9, reviewers: 4, grok: 1, gemini: 4, 'local-qwen': 2 }
 
 // The owner's permanent workstation counts never change with board history.
 // Only real excess workers add pods, in the extension behind the work floor.
@@ -33,7 +34,7 @@ export const CLAUDE_TABLES = [[-27.5, 4], [-14.5, 4], [-27.5, -13], [-14.5, -13]
 }))
 const ZONES = [
   { id: 'claude', left: -34, right: -8, back: -20, front: 12 },
-  { id: 'codex', left: -3, right: 13, back: -4, front: 12 },
+  { id: 'codex', left: -3, right: 13, back: -12, front: 12 },
   { id: 'grok', left: 30, right: 44, back: -8, front: 12,
     meeting: { x: 37, z: 6, width: 6, depth: 6, tableWidth: 3.6, tableDepth: 1.8, seats: 2 } },
   { id: 'reviewers', left: 17, right: 28, back: -4, front: 12 },
@@ -56,9 +57,16 @@ const roleKey = value => text(value).toLowerCase()
 const providerKey = value => ({ 'Claude Code': 'claude', Codex: 'codex', Grok: 'grok', Gemini: 'gemini', 'Local Qwen': 'local-qwen' })[value] || (OFFICE_PROVIDERS[value] ? value : null)
 const providerFor = agent => providerKey(agent.provider) || providerKey(agent.officeZone) || 'claude'
 const rolesFor = agent => [agent.role, ...(agent.runtimeAgents || []).map(worker => worker.agentRole)].map(roleKey)
-// Design reviews share the UX station; the role itself stays available.
-const reviewerFor = agent => REVIEWER_ROLES.find(role => rolesFor(agent).includes(roleKey(role))) || (rolesFor(agent).includes('game designer') ? 'UX/UI Reviewer' : undefined)
-const isWorking = agent => agent?.liveStatus === 'working' && agent.runtimeAgents?.some(worker => worker.status === 'working' && worker.observed !== false)
+// Only explicit Grok recovery roles enter this area. Other providers keep their
+// own review desks; a task title or an installed role is not execution evidence.
+export function grokUnblockingRole(agent) {
+  if (!agent || providerFor(agent) !== 'grok') return undefined
+  const roles = rolesFor(agent)
+  const aliases = ['阻塞定位', '方案协调', '资料跟进', '恢复验证']
+  return GROK_UNBLOCKING_ROLES.find((role, index) => roles.includes(roleKey(role)) || roles.includes(aliases[index])) ||
+    (roles.some(role => ['unblocking coordinator', 'grok unblocking coordinator', 'grok 解阻协调员'].includes(role)) ? 'Recovery Coordination' : undefined)
+}
+const isWorking = agent => agent && officeRuntimeWorkers([agent]).some(isConfirmedExecution)
 const validSlot = slot => Number.isSafeInteger(slot) && slot >= 0
 const seatKey = ({ zone, slot }) => `${zone}:${slot}`
 
@@ -69,7 +77,7 @@ function requiredPods() {
       label: `${OFFICE_PROVIDERS[zone].name} ${String(slot + 1).padStart(2, '0')}`,
     }))),
     { id: 'grok:provider', zone: 'grok', provider: 'grok', slot: 0, kind: 'provider', role: 'Manager', label: 'Grok Dispatch Lead' },
-    ...REVIEWER_ROLES.map((role, slot) => ({ id: `reviewers:role:${roleKey(role)}`, zone: 'reviewers', provider: 'grok', slot, kind: 'role', role, label: role })),
+    ...GROK_UNBLOCKING_ROLES.map((role, slot) => ({ id: `reviewers:role:${roleKey(role)}`, zone: 'reviewers', provider: 'grok', slot, kind: 'role', role, label: role })),
   ]
 }
 
@@ -114,8 +122,8 @@ export function createSharedLayout(input = [], allocations = new Map(), board = 
     if (seat.zone === 'overflow') return OVERFLOW_COLUMNS[provider].includes(seat.slot % WORKSTATION_GRID.overflow.columns.length)
     const pod = definitions.get(seatKey(seat))
     if (!pod) return false
-    if (pod.zone === 'reviewers') return roleKey(pod.role) === roleKey(reviewerFor(agent))
-    if (pod.zone === 'grok') return provider === 'grok' && rolesFor(agent).includes('manager') && !reviewerFor(agent)
+    if (pod.zone === 'reviewers') return roleKey(pod.role) === roleKey(grokUnblockingRole(agent))
+    if (pod.zone === 'grok') return provider === 'grok' && rolesFor(agent).includes('manager') && !grokUnblockingRole(agent)
     return pod.zone === provider
   }
   const assign = (agent, seat) => {
@@ -136,10 +144,10 @@ export function createSharedLayout(input = [], allocations = new Map(), board = 
     else waiting.push(agent)
   }
   for (const agent of waiting) {
-    const provider = providerFor(agent), reviewer = reviewerFor(agent)
+    const provider = providerFor(agent), unblocking = grokUnblockingRole(agent)
     const available = [...definitions.values()].filter(pod => !occupied.has(seatKey(pod)))
-    let seat = reviewer && available.find(pod => pod.zone === 'reviewers' && pod.role === reviewer)
-    if (!seat) seat = available.find(pod => pod.zone === provider && (provider !== 'grok' || rolesFor(agent).includes('manager') && !reviewer))
+    let seat = unblocking && available.find(pod => pod.zone === 'reviewers' && pod.role === unblocking)
+    if (!seat) seat = available.find(pod => pod.zone === provider && (provider !== 'grok' || rolesFor(agent).includes('manager') && !unblocking))
     if (!seat) {
       const columns = WORKSTATION_GRID.overflow.columns.length, lanes = OVERFLOW_COLUMNS[provider]
       let row = 0, slot
@@ -161,9 +169,11 @@ export function createSharedLayout(input = [], allocations = new Map(), board = 
   if (overflow.length) bases.push({ id: 'overflow', left: -34, right: 23, front: -44, back: Math.min(...overflow.map(pod => pod.podZ - pod.podDepth / 2 - 1)) })
   const zones = bases.map(base => {
     const pods = desks.filter(desk => desk.zone === base.id)
-    const style = OFFICE_PROVIDERS[base.id] || { ...OFFICE_PROVIDERS.grok, name: base.id === 'reviewers' ? 'Specialist Reviewers' : 'Main Area', department: base.id === 'reviewers' ? 'Specialist Reviewers' : 'Main Area' }
+    const pending = input.filter(agent => agent?.liveStatus !== 'offline' && (grokUnblockingRole(agent) ? base.id === 'reviewers' : providerFor(agent) === base.id))
+    const execution = officeExecutionCounts(officeRuntimeWorkers(pending))
+    const style = OFFICE_PROVIDERS[base.id] || { ...OFFICE_PROVIDERS.grok, name: base.id === 'reviewers' ? 'Grok Unblocking' : 'Main Area', department: base.id === 'reviewers' ? 'Grok Unblocking' : 'Main Area' }
     return { ...base, ...style, x: (base.left + base.right) / 2, z: (base.back + base.front) / 2,
-      width: base.right - base.left, depth: base.front - base.back, deskCount: pods.length, workingCount: pods.filter(pod => pod.occupant).length }
+      width: base.right - base.left, depth: base.front - base.back, deskCount: pods.length, workingCount: pods.filter(pod => pod.occupant).length, unconfirmedCount: execution.recorded + execution.unconfirmed }
   })
   const left = -36, right = 46, back = Math.min(LOUNGE.back, ...zones.map(zone => zone.back)) - 2, front = 39
   const bounds = { x: (left + right) / 2, z: (back + front) / 2, width: right - left, depth: front - back }

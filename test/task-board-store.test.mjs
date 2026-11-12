@@ -224,3 +224,32 @@ test('simultaneous deployment owners serialize acquisition and leave all new cla
   assert.ok(completed.every(result => result.claim === null));
   assert.deepEqual(store.snapshot().maintenance, { protocol: 1, active: true });
 });
+
+test('original author cannot claim its own review even after reviewer reassignment', async t => {
+  const { store, projectPath, worker } = await fixture(t);
+  const original = store.createTask({ title: 'Implementation', provider: 'codex', projectPath });
+  const claimed = store.claimTask(worker, { taskId: original.id });
+  store.finishTask(original.id, claimed.claimToken, { status: 'done', result: 'Implemented and checked.' });
+  const review = store.snapshot().tasks.find(task => task.reviewOf === original.id);
+  assert.equal(review.provider, 'claude');
+  store.updateTask(review.id, { provider: 'codex' });
+  assert.equal(store.claimTask(worker, { taskId: review.id }), null);
+  store.updateTask(review.id, { provider: 'any' });
+  assert.equal(store.claimTask(worker, { taskId: review.id }), null);
+  assert.ok(store.claimTask({ ...worker, id: 'independent-claude', provider: 'claude' }, { taskId: review.id }));
+});
+
+test('restored watch recovery cannot bypass unsynced approval or user-denied gates', async t => {
+  const { store, projectPath, worker } = await fixture(t, { crossReview: false });
+  const task = store.createTask({ title: 'Authorized implementation', provider: 'codex', projectPath });
+  const claim = store.claimTask(worker, { taskId: task.id });
+  const blocked = store.finishTask(task.id, claim.claimToken, { status: 'blocked', error: 'Waiting for user approval before deployment.' });
+  assert.equal(store.watchRetryAvailable(blocked), false, 'permission boundary holds even before questions are synchronized');
+  assert.equal(store.applyWatchDecision({ provider: 'codex', taskId: task.id, version: blocked.version, action: 'retry' }), false);
+  const [question] = store.syncHumanRequests();
+  const response = store.answerHumanRequest(question.id, { source: 'office-ui', replyAuthor: 'user', userMessageId: 'user-denial', userReply: '不批准', userAction: 'deny', decision: 'deny', questionHash: question.questionHash });
+  assert.equal(response.task.humanGate.state, 'denied');
+  assert.equal(store.watchRetryAvailable(response.task), false);
+  assert.equal(store.applyWatchDecision({ provider: 'codex', taskId: task.id, version: response.task.version, action: 'retry' }), false);
+  assert.equal(store.snapshot().tasks.find(item => item.id === task.id).status, 'blocked');
+});

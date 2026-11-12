@@ -5,7 +5,7 @@ import path from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 
 const equal = (a, b) => typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.glb': 'model/gltf-binary', '.gltf': 'model/gltf+json' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.glb': 'model/gltf-binary', '.gltf': 'model/gltf+json', '.hdr': 'application/octet-stream' };
 const LOGIN = `<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Office 手機入口</title><style>body{font:16px system-ui;background:#f5f3ff;color:#28213d;margin:0;display:grid;min-height:100dvh;place-items:center}main{box-sizing:border-box;width:min(92vw,420px);background:white;border-radius:22px;padding:28px;box-shadow:0 16px 60px #31235518}h1{font-size:26px}input,button{box-sizing:border-box;width:100%;padding:14px;margin-top:12px;border:1px solid #d7d2e3;border-radius:10px;font:inherit}button{background:#6650bd;color:white;cursor:pointer}p{line-height:1.6;color:#6b647c}#error{color:#a43246}</style><main><h1>AI Office</h1><p>手機與 Mac 連接同一個 Wi-Fi。輸入存取碼，或使用 Mac 提供的完整手機連結。</p><form><label for="key">存取碼</label><input id="key" type="password" autocomplete="current-password" required><button>進入辦公室</button></form><p id="error" role="alert"></p></main><script>
 const form=document.querySelector('form'),key=document.querySelector('#key'),error=document.querySelector('#error');
 async function enter(){form.querySelector('button').disabled=true;error.textContent='';try{const response=await fetch('/mobile/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:key.value})});if(!response.ok)throw Error(response.status===429?'嘗試次數過多，請稍後重試。':'存取碼不正確，請使用最新手機連結。');location.replace('/');}catch(e){error.textContent=e.message;form.querySelector('button').disabled=false}}
@@ -22,11 +22,11 @@ export function mobileRouteAllowed(method, pathname) {
     || /^\/api\/office\/instructions\/[^/]+\/retry$/.test(pathname);
 }
 
-export function createMobileGateway({ host, port = 5174, accessKey, distDir, upstreamPort = 5173, localName = 'Mac-Studio.local', now = Date.now }) {
+export function createMobileGateway({ host, port = 5174, accessKey, distDir, upstreamPort = 5173, localName = null, now = Date.now }) {
   if (!host || typeof accessKey !== 'string' || accessKey.length < 24) throw new Error('A bind address and a strong access key are required.');
   const sessions = new Map(), attempts = new Map();
   const sessionTTL = 7 * 86400000;
-  const allowedHosts = new Set([`${host}:${port}`, `${localName.toLowerCase()}:${port}`]);
+  const allowedHosts = new Set([`${host}:${port}`, ...(localName ? [`${localName.toLowerCase()}:${port}`] : [])]);
   const server = http.createServer(async (request, response) => {
     response.setHeader('Referrer-Policy', 'no-referrer');
     response.setHeader('X-Content-Type-Options', 'nosniff');
@@ -95,7 +95,7 @@ export function createMobileGateway({ host, port = 5174, accessKey, distDir, ups
   });
   server.once('listening', () => {
     const actualPort = server.address().port;
-    allowedHosts.clear(); allowedHosts.add(`${host}:${actualPort}`); allowedHosts.add(`${localName.toLowerCase()}:${actualPort}`);
+    allowedHosts.clear(); allowedHosts.add(`${host}:${actualPort}`); if (localName) allowedHosts.add(`${localName.toLowerCase()}:${actualPort}`);
   });
   server.requestTimeout = 50000;
   server.headersTimeout = 15000;

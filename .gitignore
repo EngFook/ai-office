@@ -10,11 +10,14 @@ reports/qwen-watch.json
 
 reports/qwen-work-reports.json
 
-# Private runtime evidence and local worktrees never enter public snapshots.
-reports/
+# Local runtime/build/worktree artifacts
+.cache/
 .worktrees/
-*.orig
 *.bak*
+*.orig
 *.sqlite*
 *.db
-*screenshot*
+*.log
+release/
+reports/
+config.local.json

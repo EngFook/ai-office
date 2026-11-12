@@ -1,3 +1,4 @@
+import { reviewWorkHold } from './review-policy.mjs';
 import { createHash } from 'node:crypto';
 import { WATCH_RECIPIENTS, watchHoldReason } from './watch-task-policy.mjs';
 
@@ -10,7 +11,7 @@ export function blockingKey(task) {
   const detail = normalize([task.error, task.result].filter(Boolean).join('\n')) || normalize([task.title, task.description].join('\n'));
   return createHash('sha256').update(JSON.stringify([task.projectPath, detail])).digest('hex');
 }
-export const meetingBlocked = task => task.status === 'blocked' && !watchHoldReason(task);
+export const meetingBlocked = task => task.status === 'blocked' && !reviewWorkHold(task) && !watchHoldReason(task);
 export function meetingBarrierAllows(task, record, retryAvailable = true) {
   if (!record || record.status !== 'resolved' || record.contextComplete === false) return false;
   const resolution = record.resolutions?.[task.id];

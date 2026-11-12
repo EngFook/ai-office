@@ -11,6 +11,20 @@ import { createTaskRunner, geminiAuthenticated } from '../server/task-runner.mjs
 
 const authenticated = { codex: { available: true, authenticated: true, path: '/mock/codex' }, claude: { available: true, authenticated: true, path: '/mock/claude' } };
 
+test('configured offices keep CLI permission boundaries instead of bypassing approvals and sandbox', async t => {
+  const f=await fixture(t,{runner:{providers:{claude:{enabled:true},codex:{enabled:true}}}});
+  f.store.createTask({title:'Codex configured task',provider:'codex',projectPath:f.project});
+  f.store.createTask({title:'Claude configured task',provider:'claude',projectPath:f.secondProject});
+  await f.runner.start();
+  assert.equal(f.calls.length,2);
+  for(const call of f.calls)assert.equal(call.args.some(arg=>arg.startsWith('--dangerously-')),false);
+  const codex=f.calls.find(call=>call.binary==='/mock/codex').args;
+  assert.equal(codex[codex.indexOf('--sandbox')+1],'workspace-write');
+  assert.ok(codex.includes('approval_policy="never"'));
+  const claude=f.calls.find(call=>call.binary==='/mock/claude').args;
+  assert.equal(claude[claude.indexOf('--permission-mode')+1],'dontAsk');
+});
+
 async function fixture(t, options = {}) {
   const directory = await realpath(await mkdtemp(path.join(tmpdir(), "office task runner's ")));
   const project = path.join(directory, 'project');

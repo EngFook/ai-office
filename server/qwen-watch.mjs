@@ -1,5 +1,4 @@
 import { observeUsage } from './qwen-usage-watch.mjs';
-import { localQwen } from './local-qwen.mjs';
 import { quotaResetAt } from '../src/usage-utils.js';
 import { createHash } from 'node:crypto';
 
@@ -63,12 +62,12 @@ export function watchIssues(board, runtime, quota, now = Date.now()) {
   return issues;
 }
 
-export function createQwenWatch({ store, runtimeReader = () => ({}), quotaReader = () => null, qwenClient = localQwen, projectPath = '', now = Date.now, intervalMs = WATCH_INTERVAL_MS, onChange = () => {}, publishReport = async () => {}, usageReader, readReport = async () => null } = {}) {
-  let timer, pending, controller, stopped = true;
+export function createQwenWatch({ store, runtimeReader = () => ({}), quotaReader = () => null, projectPath = '', now = Date.now, intervalMs = WATCH_INTERVAL_MS, onChange = () => {}, publishReport = async () => {}, usageReader, readReport = async () => null, prerequisiteIds = [QWEN_PREREQUISITE] } = {}) {
+  let timer, pending, stopped = true;
   const seenTasks = new Map(), observedJobs = new Map(), queuedEvents = new Map();
   let previousIssues = new Set(), previousUsage = {}, restored = false;
   let state = { started: false, phase: 'stopped', lastCheckedAt: null, nextCheckAt: null, issues: [], events: [], progress: {}, usage: {}, error: null, observation: '' };
-  const status = () => ({ ...state, issues: state.issues.map(issue => ({ ...issue })), events: state.events.map(event => ({ ...event })), progress: structuredClone(state.progress), usage: structuredClone(state.usage), intervalMs, staleMs: WATCH_STALE_MS, lowPercent: WATCH_LOW_PERCENT, noQuota: true });
+  const status = () => ({ ...state, issues: state.issues.map(issue => ({ ...issue })), events: state.events.map(event => ({ ...event })), progress: structuredClone(state.progress), usage: structuredClone(state.usage), intervalMs, staleMs: WATCH_STALE_MS, lowPercent: WATCH_LOW_PERCENT, noQuota: true, summarySource: 'structured-facts' });
   const notify = () => { try { onChange(); } catch {} };
   async function collect() {
     // snapshot's normal lease recovery is a write; patrols must be pure readers.
@@ -104,7 +103,7 @@ export function createQwenWatch({ store, runtimeReader = () => ({}), quotaReader
     previousIssues = new Set(issues.map(issue => issue.key));
     const observed = usageReader ? observeUsage(await usageReader(), previousUsage, checked) : { usage: {}, issues: [], events: [] };
     issues.push(...observed.issues);
-    return { checkedAt: iso(checked), issues, progress, usage: observed.usage, usageEvents: observed.events, ready: tasks.some(task => task.id === QWEN_PREREQUISITE && task.status === 'done') };
+    return { checkedAt: iso(checked), issues, progress, usage: observed.usage, usageEvents: observed.events, ready: prerequisiteIds.every(id => tasks.some(task => task.id === id && task.status === 'done')) };
   }
   async function publish(facts, phase, observation, error) {
     for (const event of facts.usageEvents || []) queuedEvents.set(event.key, event);
@@ -128,27 +127,16 @@ export function createQwenWatch({ store, runtimeReader = () => ({}), quotaReader
     catch { if (stopped) return status(); return publish({ checkedAt: iso(now()), issues: state.issues, progress: state.progress, usage: state.usage }, 'unavailable', '', '巡查数据读取失败；当前事实未刷新，不能判断健康状态。'); }
     if (stopped) return status();
     if (!facts.ready) return publish(facts, 'waiting', '', null);
-    state = { ...state, phase: 'checking', lastCheckedAt: facts.checkedAt, issues: facts.issues, progress: facts.progress, error: null, observation: '' };
-    controller = new AbortController();
-    let observation = '', error = null;
-    try {
-      const source = { checkedAt: facts.checkedAt, progress: facts.progress, issueCount: facts.issues.length, facts: [] };
-      for (const { type, taskId, provider, severity, detail, usage } of facts.issues.slice(0, 30)) {
-        source.facts.push({ type, taskId, provider, severity, detail, ...(usage ? { usage } : {}) });
-        if (JSON.stringify(source).length > 20000) { source.facts.pop(); break; }
-      }
-      observation = String(await qwenClient.run({ title: '任务板状态初筛', provider: 'local-qwen', role: 'Helper', supportType: 'log-triage', description: JSON.stringify(source) }, { signal: controller.signal, background: true })).slice(0, 2000);
-    } catch { error = '本地模型忙碌或不可用；以下为直接观测的结构化事实，没有模型结论。'; }
-    finally { controller = null; }
-    if (stopped) return status();
-    try {
-      const current = await collect();
-      if (JSON.stringify([facts.issues, facts.progress, facts.usage]) !== JSON.stringify([current.issues, current.progress, current.usage])) observation = '';
-      facts = current;
-    } catch { if (stopped) return status(); return publish(facts, 'unavailable', '', '推理后数据复查失败；以下为较早观测，不能判断当前健康状态。'); }
-    if (stopped) return status();
-    return publish(facts, error ? 'unavailable' : facts.issues.length ? 'attention' : 'healthy', observation, error);
+    // Counts and current quota facts are deterministic. Running a language model
+    // over a status snapshot wastes the single local slot and can invent facts.
+    const counts = Object.values(facts.progress).reduce((sum, row) => {
+      for (const key of ['pending', 'running', 'done', 'blocked', 'failed']) sum[key] += Number.isSafeInteger(row[key]) ? row[key] : 0;
+      return sum;
+    }, { pending: 0, running: 0, done: 0, blocked: 0, failed: 0 });
+    const observation = `直接观测：任务板待处理 ${counts.pending} 项、运行 ${counts.running} 项、完成 ${counts.done} 项、受阻 ${counts.blocked} 项、失败 ${counts.failed} 项；本轮 ${facts.issues.length} 项提醒。运行数仅包含任务板记录，原生代理请查看对应工作室。额度未知或过期时保持未知，受阻分工以本轮集结记录为准。`;
+    return publish(facts, facts.issues.length ? 'attention' : 'healthy', observation, null);
   }
+
   function tick() {
     if (stopped) return Promise.resolve(status());
     if (!pending) pending = scan().catch(() => { state.phase = 'unavailable'; state.error = '巡查暂不可用；将在下次巡查重试。'; notify(); return status(); }).finally(() => { pending = null; });
@@ -163,6 +151,6 @@ export function createQwenWatch({ store, runtimeReader = () => ({}), quotaReader
       schedule(); timer = setInterval(() => { schedule(); void tick(); }, intervalMs); timer.unref?.();
       return tick();
     },
-    async stop() { stopped = true; clearInterval(timer); controller?.abort(); await pending; state.started = false; state.phase = 'stopped'; state.nextCheckAt = null; },
+    async stop() { stopped = true; clearInterval(timer); await pending; state.started = false; state.phase = 'stopped'; state.nextCheckAt = null; },
   };
 }

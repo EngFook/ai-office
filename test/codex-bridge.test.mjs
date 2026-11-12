@@ -157,3 +157,134 @@ test('status endpoint is read-only and enforces loopback and same origin', async
   assert.equal((await request({ headers: { host: '127.0.0.1:5173', origin: 'https://evil.example' } })).status, 403);
   assert.equal((await request({ headers: { host: 'evil.example' } })).status, 403);
 });
+
+
+test('held writer locks awaiting catalog insertion remain individually unknown without claiming execution', async t => {
+  const options = await fixture(t);
+  const missing = new Map([['not-yet-catalogued', 123]]);
+  const partial = await readCodexStatus({ ...options, owners: missing });
+  assert.equal(partial.metadataAvailable, true);
+  assert.equal(partial.connected, true);
+  assert.equal(partial.catalogComplete, false);
+  assert.equal(partial.sourceHealth.missingThreadRecords, 1);
+  assert.equal(partial.sourceHealth.unreadableRollouts, 0);
+  assert.equal(partial.agents.length, 1);
+  assert.equal(partial.agents[0].status, 'unconfirmed');
+  assert.equal(partial.agents[0].executionState, 'unconfirmed');
+  assert.equal(partial.agents[0].observed, false);
+  assert.equal(partial.agents[0].threadMetadataAvailable, false);
+  await rm(path.join(options.codexHome, 'state_5.sqlite'));
+  const unavailable = await readCodexStatus(options);
+  assert.equal(unavailable.metadataAvailable, false);
+  assert.equal(unavailable.connected, false);
+  assert.deepEqual(unavailable.agents, []);
+});
+
+test('loaded Codex sessions without readable lifecycle are unconfirmed, then recover from actual turn events', async t => {
+  const options = await fixture(t);
+  const file = path.join(options.codexHome, 'sessions', 'root-id.jsonl');
+  await rm(file);
+  let status = await readCodexStatus(options);
+  let root = status.agents.find(agent => agent.id === 'root-id');
+  assert.equal(root.executionState, 'unconfirmed');
+  assert.equal(root.lifecycleSourceAvailable, false);
+  assert.equal(root.lastEventAt, null);
+  assert.equal(root.activityPhase, 'session-detected');
+  assert.equal(status.sourceHealth.unreadableRollouts, 1);
+  await writeFile(file, line(record('turn_started', 5000)));
+  status = await readCodexStatus(options);
+  root = status.agents.find(agent => agent.id === 'root-id');
+  assert.equal(root.executionState, 'working');
+  assert.equal(root.lifecycleSourceAvailable, true);
+  assert.equal(root.lastEventAt, '1970-01-01T00:00:05.000Z');
+  assert.equal(status.sourceHealth.unreadableRollouts, 0);
+});
+
+test('unreadable catalog with no held locks cannot report a healthy empty observation', async t => {
+  const options = await fixture(t);
+  await rm(path.join(options.codexHome, 'state_5.sqlite'));
+  const status = await readCodexStatus({ ...options, owners: new Map() });
+  assert.equal(status.metadataAvailable, false);
+  assert.equal(status.sourceHealth.threadMetadata, false);
+});
+
+
+test('one newly locked uncatalogued thread does not hide another known running agent', async t => {
+  const options = await fixture(t);
+  options.owners.set('new-child', 123);
+  let status = await readCodexStatus(options);
+  const root = status.agents.find(agent => agent.id === 'root-id');
+  assert.equal(status.metadataAvailable, true);
+  assert.equal(status.connected, true);
+  assert.equal(status.catalogComplete, false);
+  assert.equal(status.sourceHealth.catalogComplete, false);
+  assert.equal(status.sourceHealth.missingThreadRecords, 1);
+  assert.equal(root.executionState, 'working');
+  assert.equal(root.observed, true);
+  assert.equal(root.lifecycleSourceAvailable, true);
+  assert.equal(status.agents.find(agent => agent.id === 'new-child').executionState, 'unconfirmed');
+  assert.ok(status.agents.every(agent => !Object.hasOwn(agent, 'pid')));
+  options.owners.delete('new-child');
+  status = await readCodexStatus(options);
+  assert.equal(status.catalogComplete, true);
+  assert.equal(status.sourceHealth.missingThreadRecords, 0);
+  assert.equal(status.agents.some(agent => agent.id === 'new-child'), false);
+  assert.equal(status.agents.find(agent => agent.id === 'root-id').executionState, 'working');
+});
+
+test('actual writer-lock outage remains unavailable even with readable cached thread activity', async t => {
+  const options = await fixture(t);
+  await readCodexStatus(options);
+  const status = await readCodexStatus({ ...options, owners: undefined });
+  assert.equal(status.metadataAvailable, false);
+  assert.equal(status.connected, false);
+  assert.equal(status.catalogComplete, false);
+  assert.equal(status.sourceHealth.writerLocks, false);
+  assert.equal(status.sourceHealth.threadMetadata, true);
+  assert.ok(status.agents.every(agent => agent.status === 'offline'));
+});
+
+
+test('agents view omits skill catalog without changing native execution evidence or cached default response', async t => {
+  const options = await fixture(t);
+  let middleware;
+  codexBridge(options).configureServer({ middlewares: { use(handler) { middleware = handler; } } });
+  async function request(url = '/api/codex/status', extra = {}) {
+    let body;
+    const response = { statusCode: 200, setHeader() {}, end(text) { body = text; } };
+    await middleware({ url, method: 'GET', socket: { remoteAddress: '127.0.0.1' }, headers: { host: '127.0.0.1:5173' }, ...extra }, response, () => assert.fail('Expected status endpoint'));
+    return { status: response.statusCode, body: JSON.parse(body) };
+  }
+  const full = (await request()).body;
+  assert.equal(full.skills.length, 1);
+  const compact = await request('/api/codex/status?view=agents');
+  assert.equal(compact.status, 200);
+  assert.equal(Object.hasOwn(compact.body, 'skills'), false);
+  assert.deepEqual(compact.body.agents, full.agents);
+  assert.deepEqual(compact.body.sourceHealth, full.sourceHealth);
+  for (const key of ['connected', 'metadataAvailable', 'catalogComplete', 'observedAt', 'lastEventAt', 'liveAgentCount']) assert.deepEqual(compact.body[key], full[key], key);
+  assert.deepEqual((await request()).body, full, 'projection must not mutate the cached full status');
+  assert.deepEqual((await request('/api/codex/status?view=unknown')).body, full);
+  assert.deepEqual((await request('/api/codex/status?view=agents-extra')).body, full);
+  assert.deepEqual((await request('/api/codex/status?unknown=agents')).body, full);
+  assert.equal((await request('/api/codex/status?view=agents', { method: 'POST' })).status, 405);
+  assert.equal((await request('/api/codex/status?view=agents', { socket: { remoteAddress: '10.0.0.1' } })).status, 403);
+  assert.equal((await request('/api/codex/status?view=agents', { headers: { host: '127.0.0.1:5173', origin: 'https://evil.example' } })).status, 403);
+});
+
+
+test('compact view stays limited to status and honors disabled bridge configuration', async () => {
+  let middleware;
+  codexBridge({ enabled: false }).configureServer({ middlewares: { use(handler) { middleware = handler; } } });
+  async function request(url) {
+    let body;
+    const response = { statusCode: 200, setHeader() {}, end(text) { body = JSON.parse(text); } };
+    await middleware({ url, method: 'GET', socket: { remoteAddress: '127.0.0.1' }, headers: { host: '127.0.0.1:5173' } }, response, () => assert.fail('Expected Codex endpoint'));
+    assert.equal(response.statusCode, 200);
+    return body;
+  }
+  const expected = { connected: false, enabled: false, agents: [], skills: [], error: null };
+  assert.deepEqual(await request('/api/codex/status'), expected);
+  assert.deepEqual(await request('/api/codex/status?view=agents'), { connected: false, enabled: false, agents: [], error: null, totalAgentCount: 0, omittedOfflineCount: 0 });
+  assert.deepEqual(await request('/api/codex/workspace?view=agents'), expected);
+});

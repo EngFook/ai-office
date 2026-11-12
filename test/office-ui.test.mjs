@@ -11,10 +11,10 @@ test('drawer follows runner claim to native main session without selecting a sib
   assert.equal(taskMatchesAgent(task, main, runtime), true);
   assert.equal(findTaskAgent(task, [child, main], runtime), main);
 });
-test('blocked task links retain direct worker identity and use explicit provider hints when unassigned', () => {
+test('blocked task links retain direct worker identity and never invent an unassigned provider association', () => {
   const agent = { id: 'shared:claude:a', provider: 'Claude Code', runtimeAgents: [{ id: 'a' }] };
   assert.equal(findTaskAgent({ assignee: 'a' }, [agent], {}), agent);
-  assert.equal(findTaskAgent({ provider: 'any' }, [agent], {}, 'claude'), agent);
+  assert.equal(findTaskAgent({ provider: 'any' }, [agent], {}, 'claude'), undefined);
   assert.equal(findTaskAgent({ provider: 'codex' }, [agent], {}), undefined);
 });
 test('drawer readiness distinguishes checking, authenticated models and Grok connection state', () => {
@@ -25,7 +25,7 @@ test('drawer readiness distinguishes checking, authenticated models and Grok con
   assert.equal(modelReadiness('Grok', {}, {connected:true,loading:true}), undefined);
 });
 
-test('department navigation follows fixed scene zones with Gemini after the specialist reviewers', async () => {
+test('department navigation follows fixed scene zones with Gemini after the Grok unblocking area', async () => {
   const { createSharedLayout } = await import('../src/shared-layout.js');
   const layout = createSharedLayout();
   for (const [index, zone] of ['claude','codex','grok','gemini','local-qwen'].entries()) {
@@ -33,6 +33,6 @@ test('department navigation follows fixed scene zones with Gemini after the spec
     assert.equal(layout.zones[Number(focus.split('-')[1])].id, zone);
     assert.ok(roomProvider(focus));
   }
-  assert.equal(roomProvider('department-3'), undefined);
+  assert.equal(roomProvider('department-3'), 'Grok');
   assert.equal(roomProvider('department-6'), undefined);
 });

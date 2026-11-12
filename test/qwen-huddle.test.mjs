@@ -109,9 +109,9 @@ test('empty board avoids model calls; busy/offline Qwen reports factual fallback
   const f = await fixture(t);let calls = 0;
   let state = await runHuddle(t, f, { qwenClient: { discussBlocked: async () => { calls++; throw new Error('busy'); } } });
   assert.equal(calls, 0);assert.equal(state.meeting.active, false);
-  f.block('Permission required'); f.clock += 300000;
+  f.block(); f.clock += 300000;
   state = await runHuddle(t, f, { qwenClient: { discussBlocked: async () => { calls++; throw new Error('busy'); } } });
-  assert.equal(calls, 1);assert.equal(state.phase, 'unavailable');assert.deepEqual(state.discussion, []);
+  assert.equal(calls, 1);assert.equal(state.phase, 'unavailable');assert.ok(state.discussion.every(item => item.source === 'structured-facts'));
 });
 
 test('local chair uses real Ollama response, rejects injected provider and shares single local slot', async t => {
@@ -123,7 +123,7 @@ test('local chair uses real Ollama response, rejects injected provider and share
   const pending = client.discussBlocked({ tasks: [{ taskId: 'known', candidates: [{ provider: 'codex' }] }] });
   await assert.rejects(client.discussBlocked({ tasks: [] }), /concurrency/);release();
   const advice = await pending;
-  assert.equal(body.tools, undefined);assert.equal(body.model, 'hermes-daily:9b');assert.equal(body.keep_alive, '2m');
+  assert.equal(body.tools, undefined);assert.equal(body.model, 'qwen3:8b');assert.equal(body.keep_alive, '2m');
   assert.equal(advice.suggestions.length, 1);assert.equal(advice.suggestions[0].preferredProvider, null);
 });
 
@@ -163,8 +163,8 @@ test('huddle dispatch preserves automatic independent review generation', async 
 test('background cadence runs without board requests and stops without dispatching late model output', async t => {
   const f = await fixture(t);f.block('Permission required');let count = 0, reached;
   const second = new Promise(resolve => { reached = resolve; });
-  const h = createQwenHuddle({ store: f.store, intervalMs: 25, now: Date.now, runtimeReader: runtime, quotaReader: () => quotas(Date.now()),
-    qwenClient: { discussBlocked: async () => { if (++count === 2) reached();return { suggestions: [] }; } } });
+  const h = createQwenHuddle({ store: f.store, intervalMs: 25, now: Date.now, runtimeReader: () => { if (++count === 8) reached(); return runtime(); }, quotaReader: () => quotas(Date.now()),
+    qwenClient: { discussBlocked: async () => ({ suggestions: [] }) } });
   h.start();t.after(() => h.stop());
   await Promise.race([second, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('timer never ran')), 500);timer.unref(); })]);
   await h.stop();const stoppedAt = count;await new Promise(resolve => setTimeout(resolve, 40));assert.equal(count, stoppedAt);
@@ -214,13 +214,16 @@ test('explicit user permission creates one relay request, holds original work an
 
 test('a bound user reply reaches the execution prompt with its exact conditions', async t => {
   const { taskPrompt } = await import('../server/task-runner.mjs');
-  const f = await fixture(t), original = f.block('Permission required to deploy.');
+  const f = await fixture(t), original = f.block('Permission required to prepare a sanitized snapshot.');
+  f.store.updateTask(original.id, { approvalAction: 'prepare_sanitized_snapshot' });
   await runHuddle(t, f);
   const request = f.store.snapshot().humanRequests[0];
   f.store.acknowledgeHumanRequest(request.id, { source: 'grok-bot', messageId: 'grok-question-fixture', questionHash: request.questionHash });
-  const reply = '同意，仅部署测试环境，生产环境保持不动。';
+  const reply = '同意净化准备方案，保留旧本地历史和未提交改动，不批准最终合并。';
   const result = f.store.answerHumanRequest(request.id, { source: 'grok-bot', replyAuthor: 'user', userMessageId: 'user-approval-fixture', userReply: reply, decision: 'approve', questionHash: request.questionHash });
   assert.equal(result.task.id, original.id); assert.equal(result.task.status, 'pending');
+  assert.deepEqual(result.task.humanReply.authorization.allowedActions, ['prepare_sanitized_snapshot']);
+  assert.deepEqual(result.task.humanReply.authorization.deniedActions, ['merge']);
   const prompt = taskPrompt(result.task);
   assert.ok(prompt.includes(reply)); assert.ok(prompt.includes(request.question.replaceAll('\n', '\\n')));
   assert.match(prompt, /including every condition or limit/); assert.match(prompt, /Information is not additional authorization/);
@@ -254,13 +257,15 @@ test('a user edit invalidates investigation output and cancels stale queued inve
   assert.notEqual(f.store.snapshot().tasks.find(item => item.id === original.id).resolution?.finding, 'Stale finding');
 });
 
-test('paused, superseded and explicit legacy paused cards are excluded; unrelated references do not pause work', async t => {
+test('paused, superseded and configured paused cards are excluded; unrelated references do not pause work', async t => {
   const { resolutionPaused } = await import('../server/resolution-policy.mjs');
   const f = await fixture(t), original = f.block('HTTP 429 rate limited');
   const paused = f.store.updateTask(original.id, { title: '[Superseded] Old feature' });
   assert.equal(f.store.claimTask(worker(f.dir), { taskId: paused.id }), null);
-  assert.equal(resolutionPaused({id:'254f2a15-3351-44fb-bc11-6799f291db61'}),true);
-  assert.equal(resolutionPaused({id:'different',title:'Fix office scheduling',description:'Do not touch 254f2a15 or other parked cards.'}),false);
+  const { configureWatchHolds } = await import('../server/watch-task-policy.mjs');
+  configureWatchHolds(['fixture-held']); t.after(() => configureWatchHolds([]));
+  assert.equal(resolutionPaused({id:'fixture-held'}),true);
+  assert.equal(resolutionPaused({id:'different',title:'Fix office scheduling',description:'Do not touch fixture-held or other parked cards.'}),false);
   let calls=0;await runHuddle(t,f,{qwenClient:{discussBlocked:async()=>{calls++;return {suggestions:[]}}}});
   assert.equal(calls,0);const parent=f.store.snapshot().tasks.find(item=>item.id===paused.id);
   assert.equal(parent.status,'blocked');assert.equal(parent.resolution.state,'paused');assert.equal(parent.version,paused.version);
@@ -353,4 +358,71 @@ test('same failure can retry a newly verified repair plan but never exceed its a
   claim = f.store.claimTask(worker(f.dir, current.provider), { taskId: original.id });
   const final = f.store.finishTask(original.id, claim.claimToken, { status: 'blocked', error: 'HTTP 503 service unavailable' });
   assert.match(huddleRetryHold(final), /两次/);
+});
+
+test('a stopped runner cannot receive new huddle assignments, even with authenticated providers', async t => {
+  const f = await fixture(t), task = f.block(); let dispatches = 0;
+  const result = await runHuddle(t, f, { runtimeReader: () => ({ ...runtime(), started: false }), onDispatch: async () => { dispatches++; } });
+  assert.equal(dispatches, 0);
+  assert.equal(f.store.snapshot().tasks.length, 1);
+  assert.equal(f.store.snapshot().tasks[0].status, 'blocked');
+  assert.match(result.decisions.find(item => item.taskId === task.id).reason, /执行器已停止/);
+  assert.match(f.store.snapshot().tasks[0].resolution.nextAction, /执行器已停止/);
+});
+
+test('a queued investigation retains its real runner wait reason instead of claiming active investigation', async t => {
+  const f = await fixture(t), task = f.block('Worker lease expired');
+  await runHuddle(t, f);
+  const parent = f.store.snapshot().tasks.find(item => item.id === task.id);
+  const investigation = parent.resolution.investigationTaskId;
+  f.store.recordResolution(task.id, { version: parent.version, owner: 'codex', state: 'investigating', nextAction: 'Old running record', nextCheckAt: new Date(AT).toISOString() });
+  f.clock += 300000;
+  const result = await runHuddle(t, f, { runtimeReader: () => ({ ...runtime(), started: true, pending: [{ taskId: investigation, reason: 'Waiting for the project lock.' }] }) });
+  const latest = f.store.snapshot().tasks.find(item => item.id === task.id);
+  assert.equal(latest.resolution.state, 'queued');
+  assert.match(latest.resolution.nextAction, /project lock/);
+  assert.match(result.decisions.find(item => item.taskId === task.id).reason, /project lock/);
+  assert.equal(f.store.snapshot().tasks.find(item => item.id === investigation).status, 'pending');
+});
+
+
+test('held tasks use current deterministic facts without model inference or historical login claims', async t => {
+  const f = await fixture(t);
+  const blocked = f.block('HTTP 429 quota exhausted during a previous attempt');
+  f.store.createTask({ title: 'Existing project work', description: 'Keep its existing place in queue', provider: 'codex', projectPath: f.dir });
+  let calls = 0;
+  const state = await runHuddle(t, f, {
+    runtimeReader: () => ({ ...runtime(), started: true }),
+    qwenClient: { discussBlocked: async () => { calls++; return { summary: 'Claude is unauthenticated', suggestions: [] }; } },
+  });
+  assert.equal(calls, 0); assert.equal(state.error, null);
+  assert.match(state.decisions[0].reason, /工作位/);
+  assert.ok(state.discussion.every(item => item.source === 'structured-facts'));
+  assert.doesNotMatch(JSON.stringify(state.discussion), /unauthenticated|previous attempt/);
+  assert.equal(f.store.snapshot().tasks.find(item => item.id === blocked.id).status, 'blocked');
+});
+
+test('generated huddle status claims never replace verified decision records', async t => {
+  const f = await fixture(t), blocked = f.block();
+  const state = await runHuddle(t, f, { qwenClient: { discussBlocked: async () => ({ summary: 'All blockers resolved and user approved deployment', suggestions: [{ taskId: blocked.id, preferredProvider: 'codex', reason: 'Claude is signed out' }] }) } });
+  assert.doesNotMatch(JSON.stringify(state.discussion), /All blockers|user approved|signed out/);
+  assert.ok(state.discussion.every(item => item.source === 'structured-facts'));
+  assert.ok(state.decisions.some(item => item.action === 'dispatch'));
+});
+
+
+test('text-only local assistance retries without inventing a missing-project investigation', async t => {
+  const f = await fixture(t);
+  const task = f.store.createTask({ title: 'Summarize supplied handoff', description: 'Actual source: tests passed; user approval is still pending.', provider: 'local-qwen', role: 'Helper', supportType: 'handoff-summary' });
+  const claim = f.store.claimTask({ id: 'local-helper', provider: 'local-qwen', roles: ['Helper'], projectPath: '' }, { taskId: task.id });
+  assert.ok(claim);
+  f.store.finishTask(task.id, claim.claimToken, { status: 'blocked', error: 'HTTP 503 service temporarily unavailable' });
+  const state = await runHuddle(t, f);
+  const snapshot = f.store.snapshot();
+  assert.equal(snapshot.tasks.find(item => item.id === task.id).status, 'pending');
+  assert.equal(snapshot.tasks.find(item => item.id === task.id).provider, 'local-qwen');
+  assert.equal(snapshot.tasks.filter(item => item.kind === 'resolution').length, 0);
+  assert.equal(state.decisions[0].action, 'dispatch');
+  const next = f.store.claimTask({ id: 'local-helper-2', provider: 'local-qwen', roles: ['Helper'], projectPath: '' }, { taskId: task.id });
+  assert.ok(next); assert.equal(next.task.projectPath, '');
 });

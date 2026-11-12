@@ -1,34 +1,34 @@
+import { officeCapability } from './office-capabilities.js';
 import { requestId } from './request-id.js';
 import React, { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useLang } from './i18n'
-import { humanRelayStateLabel, questionActionPayload, questionErrorMessage } from './human-relay-ui.js'
+import { humanRelayStateLabel, humanRequestNeedsUser, humanRequestGroups, questionActionPayload, questionErrorMessage } from './human-relay-ui.js'
+import { compactTaskText } from './task-card-content.js'
 import { containDialogFocus } from './task-board-ui.js'
 
 export default function HumanRelayPanel({ requests = [], board, onSelectTask }) {
   const zh = useLang() === 'zh'
   const [selected, setSelected] = useState(null)
   const [notice, setNotice] = useState('')
-  const tasks = new Map((board?.state?.tasks || []).map(task => [task.id, task]))
-  const current = requests.filter(request => ['pending', 'delivered', 'denied'].includes(request.state) &&
-    tasks.get(request.taskId)?.status === 'blocked' && tasks.get(request.taskId)?.humanGate?.requestId === request.id)
-  const needsYou = request => request.state === 'delivered' || request.kind === 'approval' || request.requiresUserAction || request.triage?.outcome === 'needs_user'
-  const sorted = [...current].sort((a, b) => Number(needsYou(b)) - Number(needsYou(a)))
+  const groups = humanRequestGroups(requests, board?.state?.tasks || [])
   const selectedCurrent = selected && requests.find(request => request.id === selected.id)
+  const renderRequests = items => <ul className="tb-coordination__list tb-question-list" data-no-i18n>{items.map(request => <li key={request.id} className={humanRequestNeedsUser(request) ? 'needs-user' : ''}>
+    <div className="tb-coordination__row"><strong>{request.taskTitle || request.taskId}</strong><span className="tb-question-badge">{request.state === 'denied' ? (zh ? '已拒绝' : 'Declined') : request.kind === 'approval' ? (zh ? '等你决定' : 'Your decision') : humanRequestNeedsUser(request) ? (zh ? '等你补资料' : 'Your information') : (zh ? '待 Grok 核查' : 'Grok to investigate')}</span></div>
+    <p className="tb-question-preview">{compactTaskText(request.triage?.outcome === 'needs_user' ? request.triage.summary || request.question : request.question, zh ? '打开查看完整问题。' : 'Open the complete question.')}</p>
+    <p className={`tb-human-relay__state is-${request.state}`}>{request.state === 'pending' && humanRequestNeedsUser(request) ? (zh ? '可直接在这里回复；尚未确认 Grok 已转告。' : 'Reply here directly; Grok delivery is not confirmed.') : humanRelayStateLabel(request.state, zh)}</p>
+    <div className="tb-question-actions">
+      <button type="button" className="tb-button" onClick={() => setSelected(request)}>{request.state === 'denied' ? (zh ? '查看 / 重新请求' : 'View / request again') : request.kind === 'approval' ? (zh ? '查看并决定' : 'Review and decide') : humanRequestNeedsUser(request) ? (zh ? '填写资料 / 回复' : 'Add information / reply') : (zh ? '查看核查问题' : 'View question under review')}</button>
+      <button type="button" className="tb-text-button" onClick={() => onSelectTask?.(request.taskId)} disabled={!onSelectTask}>{zh ? '原任务' : 'Original task'}</button>
+    </div>
+  </li>)}</ul>
   return <section className="tb-coordination tb-human-relay" data-no-i18n aria-labelledby="tb-human-heading">
-    <header className="tb-human-relay__heading"><h3 id="tb-human-heading">{zh ? '需要你处理' : 'Needs your attention'}</h3><span>{zh ? `${current.filter(q => q.state !== 'denied').length} 项可回复` : `${current.filter(q => q.state !== 'denied').length} open questions`}</span></header>
-    <p>{zh ? '资料和决定都可以在这里回复。Grok 先查现有资料，能解决的直接交回负责人；解决不了才请你补充。每次回复只适用于对应任务。' : 'Reply here with information or a decision. Grok checks existing records first and asks you only for unresolved details. Each reply applies only to its linked task.'}</p>
+    <header className="tb-human-relay__heading"><h3 id="tb-human-heading">{zh ? '需要你处理' : 'Needs your attention'}</h3><span>{zh ? `${groups.needsUser.length} 项等你回复` : `${groups.needsUser.length} awaiting your reply`}</span></header>
     {notice && <p className="tb-question-notice" role="status">{notice}</p>}
-    {sorted.length ? <ul className="tb-coordination__list tb-question-list">{sorted.map(request => <li key={request.id} className={needsYou(request) ? 'needs-user' : ''}>
-      <div className="tb-coordination__row"><strong>{request.taskTitle || request.taskId}</strong><span className="tb-question-badge">{request.state === 'denied' ? (zh ? '已拒绝' : 'Declined') : request.kind === 'approval' ? (zh ? '等你决定' : 'Your decision') : needsYou(request) ? (zh ? '等你补资料' : 'Your information') : (zh ? '待 Grok 核查' : 'Grok to investigate')}</span></div>
-      <p className="tb-question-preview">{request.triage?.outcome === 'needs_user' ? request.triage.summary : request.question}</p>
-      <p className={`tb-human-relay__state is-${request.state}`}>{humanRelayStateLabel(request.state, zh)}</p>
-      <div className="tb-question-actions">
-        <button type="button" className="tb-button" onClick={() => setSelected(request)}>{request.state === 'denied' ? (zh ? '查看 / 重新请求' : 'View / request again') : request.kind === 'approval' ? (zh ? '查看并决定' : 'Review and decide') : (zh ? '填写资料 / 回复' : 'Add information / reply')}</button>
-        <button type="button" className="tb-text-button" onClick={() => onSelectTask?.(request.taskId)} disabled={!onSelectTask}>{zh ? '原任务' : 'Original task'}</button>
-      </div>
-    </li>)}</ul> : <p>{zh ? '暂时没有需要你补充或确认的问题。' : 'No questions need your information or confirmation.'}</p>}
-    <GrokWakeSetup board={board} zh={zh}/>
+    {groups.needsUser.length ? renderRequests(groups.needsUser) : <p>{zh ? '目前没有等你决定或补资料的问题。' : 'No questions currently need your decision or information.'}</p>}
+    {groups.grokCheck.length > 0 && <details className="tb-human-group"><summary>{zh ? `待 Grok 核查 · ${groups.grokCheck.length} 项` : `Awaiting Grok check · ${groups.grokCheck.length}`}</summary><p>{zh ? '先核查已有资料；仍需你补充时会移到上方。' : 'Existing information is checked first. Questions needing you will move above.'}</p>{renderRequests(groups.grokCheck)}</details>}
+    {groups.denied.length > 0 && <details className="tb-human-group"><summary>{zh ? `已拒绝／暂停 · ${groups.denied.length} 项` : `Declined / paused · ${groups.denied.length}`}</summary>{renderRequests(groups.denied)}</details>}
+    {officeCapability(board?.state, 'grokWakeConfiguration') && <GrokWakeSetup board={board} zh={zh}/>}
     {selected && createPortal(<QuestionDialog key={selected.id + selected.questionHash} request={selected} current={selectedCurrent} board={board} zh={zh} onClose={() => setSelected(null)} onResult={setNotice}/>, document.body)}
   </section>
 }
@@ -87,15 +87,15 @@ function QuestionDialog({ request, current, board, zh, onClose, onResult }) {
       {result ? <p role="status" className="tb-question-notice">{result}</p> : <>
         {changed && <p role="alert">{zh ? '问题已更新或已被处理，请关闭后打开最新问题。你的输入仍保留在此处。' : 'This question changed or was handled. Close and open the latest one. Your draft remains here.'}</p>}
         {request.state !== 'denied' && <>
-          <label className="tb-field">{request.kind === 'approval' ? (zh ? '补充条件或拒绝原因（可选）' : 'Conditions or reason (optional)') : (zh ? '你的回复' : 'Your reply')}
-            <textarea ref={input} value={reply} maxLength={7000} rows={5} disabled={busy || changed} onChange={e => setReply(e.target.value)} placeholder={zh ? '写清楚资料、位置或你的决定…' : 'Add the information, location or your decision…'}/>
+          <label className="tb-field">{request.approvalScope ? (zh ? '明确决定（批准时必填；拒绝原因可选）' : 'Explicit decision (required to approve; reason optional to decline)') : request.kind === 'approval' ? (zh ? '决定或拒绝原因（可选）' : 'Decision or reason (optional)') : (zh ? '你的回复' : 'Your reply')}
+            <textarea ref={input} value={reply} maxLength={7000} rows={5} disabled={busy || changed} onChange={e => setReply(e.target.value)} placeholder={request.approvalScope ? (zh ? '同意净化准备方案' : 'I approve sanitized snapshot preparation') : (zh ? '写清楚资料、位置或你的决定…' : 'Add the information, location or your decision…')}/>
           </label>
           {request.kind === 'info' && <details><summary>{zh ? '原项目目录已失效？提供新的目录' : 'Original project unavailable? Provide its replacement'}</summary>
-            <label className="tb-field">{zh ? '已有项目的完整路径（也需写在回复中）' : 'Existing absolute project path (also include it in your reply)'}<input value={projectPath} onChange={e => setProjectPath(e.target.value)} disabled={busy || changed} placeholder="/absolute/project/path"/></label>
+            <label className="tb-field">{zh ? '已有项目的完整路径（也需写在回复中）' : 'Existing absolute project path (also include it in your reply)'}<input value={projectPath} onChange={e => setProjectPath(e.target.value)} disabled={busy || changed} placeholder="/path/to/project"/></label>
           </details>}
-          <p className="tb-question-hint">{request.kind === 'approval' ? (zh ? '点击“批准”只同意上面这项具体请求，并附上你填写的条件。' : 'Approve applies only to the request above, including your written conditions.') : (zh ? '提交资料不会批准其他操作。确认条件已恢复，也只会要求负责人重新核查。' : 'Information does not approve other actions. Confirming restoration asks the owner to verify again.')}</p>
+          <p className="tb-question-hint">{request.approvalScope ? (zh ? '批准前请明确填写“同意净化准备方案”。仅允许准备隔离净化快照并保留本地历史和未提交改动，不允许合并、推送或部署。拒绝可直接点击，无需填写。' : 'To approve, type “I approve sanitized snapshot preparation”. This permits an isolated sanitized snapshot while preserving local history and uncommitted changes. Merge, push and deploy remain unapproved. You can decline without typing.') : request.kind === 'approval' ? (zh ? '点击“批准”只同意上面这项完整请求。若只同意部分工作或需附加条件，请先修改任务范围并重新生成问题。拒绝可直接点击。' : 'Approve accepts the complete request above. For partial approval or additional conditions, update the task scope and ask a new question first. You can decline without typing.') : (zh ? '提交资料不会批准其他操作。确认条件已恢复，也只会要求负责人重新核查。' : 'Information does not approve other actions. Confirming restoration asks the owner to verify again.')}</p>
           <div className="tb-question-actions">
-            {request.kind === 'approval' ? <button type="button" className="tb-button" disabled={busy || changed} onClick={() => act('approve')}>{zh ? '批准这项请求' : 'Approve this request'}</button> : <>
+            {request.kind === 'approval' ? <button type="button" className="tb-button" disabled={busy || changed || !!request.approvalScope && !reply.trim()} onClick={() => act('approve')}>{zh ? '批准这项请求' : 'Approve this request'}</button> : <>
               <button type="button" className="tb-button" disabled={busy || changed || !reply.trim()} onClick={() => act('provide_info')}>{zh ? '提交回复' : 'Submit reply'}</button>
               <button type="button" className="tb-text-button" disabled={busy || changed} onClick={() => act('restored')}>{zh ? '确认条件已恢复' : 'Confirm conditions restored'}</button>
             </>}

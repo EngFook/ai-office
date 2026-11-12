@@ -155,3 +155,20 @@ test('hook drops invalid and oversized input, sanitizes optional fields and give
   assert.deepEqual(Object.keys(failure.data).sort(), ['event', 'sessionId', 'timestamp']);
   assert.ok(!JSON.stringify(failure.data).includes('secret'));
 });
+
+
+test('ordinary Claude installation connects observer without gamedev plugin or generated specialists', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'office-generic-hook-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const claudeDir = path.join(root, '.claude');
+  await mkdir(claudeDir);
+  const original = { permissions: { allow: ['Read'] }, model: 'user-choice' };
+  await writeFile(path.join(claudeDir, 'settings.json'), JSON.stringify(original));
+  const result = await connectClaude({ claudeDir });
+  assert.equal(result.specialists, 0); assert.equal(result.router, null); assert.equal(result.pluginRoot, null);
+  const saved = JSON.parse(await readFile(path.join(claudeDir, 'settings.json'), 'utf8'));
+  assert.deepEqual(saved.permissions, original.permissions); assert.equal(saved.model, original.model);
+  for (const event of HOOK_EVENTS) assert.equal(saved.hooks[event].length, 1);
+  await assert.rejects(stat(path.join(claudeDir, 'agents')), { code: 'ENOENT' });
+  assert.equal((await connectClaude({ claudeDir })).changedFiles, 0);
+});

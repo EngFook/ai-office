@@ -10,10 +10,10 @@ import { createUsageReader, usageBridge } from '../server/usage-bridge.mjs';
 const ms = Date.parse('2026-11-03T01:00:00Z');
 const minute = 60000;
 const sample = (at = ms, used = 60, tokens = 10000) => ({ generatedAt: at, providers: [
-  { provider: 'Claude Code', models: [{ today: { total: tokens } }] },
-  { provider: 'Codex', models: [{ today: { total: tokens } }] },
+  { provider: 'Claude Code', timeZone: 'Asia/Singapore', models: [{ today: { total: tokens } }] },
+  { provider: 'Codex', timeZone: 'Asia/Singapore', models: [{ today: { total: tokens } }] },
   { provider: 'Gemini', models: [] }, { provider: 'Grok', models: [] },
-  { provider: 'Local Qwen', noQuota: true, todayTokens: tokens, online: true, averageTokPerSecond: 12 },
+  { provider: 'Local Qwen', timeZone: 'Asia/Singapore', noQuota: true, todayTokens: tokens, online: true, averageTokPerSecond: 12 },
 ], quota: Object.fromEntries(['claude', 'codex', 'gemini', 'grok'].map(p => [p, { observedAt: at, windows: p === 'gemini' ? [] : [{ name: 'Weekly', usedPercent: used, remainingPercent: 100 - used, resetsAt: ms + 86400000 }] }])) });
 const forProvider = (result, provider) => result.events.filter(event => event.provider === provider);
 
@@ -60,6 +60,17 @@ test('token rise needs absolute and proportional growth in a comparable Singapor
   assert.equal(observeUsage(sample(midnight, 60, 20000), prior, midnight).events.filter(e => e.type === 'usage-rise').length, 0);
 });
 
+test('daily token comparisons follow the source time zone, not a fixed Singapore day', () => {
+  const midnight = Date.parse('2026-11-04T00:00:00Z');
+  const before = sample(midnight - minute, 60, 10000), after = sample(midnight + minute, 60, 20000);
+  for (const data of [before, after]) for (const provider of data.providers) provider.timeZone = 'UTC';
+  const old = observeUsage(before, {}, midnight - minute).usage;
+  assert.equal(observeUsage(after, old, midnight + minute).events.filter(event => event.type === 'usage-rise').length, 0);
+  for (const data of [before, after]) for (const provider of data.providers) provider.timeZone = 'America/New_York';
+  const sameDay = observeUsage(before, {}, midnight - minute).usage;
+  assert.equal(observeUsage(after, sameDay, midnight + minute).events.filter(event => event.type === 'usage-rise').length, 3);
+});
+
 test('stale, missing, malformed and failed telemetry never becomes numeric quota evidence', () => {
   for (const patch of [data => { data.quota.codexError = 'PRIVATE'; }, data => { data.quota.codex.observedAt = ms - 31 * minute; }, data => { data.quota.codex.observedAt = ms + 2 * minute; }, data => { data.generatedAt = ms - 31 * minute; }]) {
     const data = sample(ms, 100); patch(data);
@@ -75,6 +86,18 @@ test('stale, missing, malformed and failed telemetry never becomes numeric quota
   assert.equal(observeUsage(null, {}, ms).usage['local-qwen'].quotaState, 'no-quota');
   const grok = sample(); grok.quota.grok.observedAt = ms - 5 * 3600000;
   assert.equal(observeUsage(grok, {}, ms).usage.grok.quotaState, 'available');
+});
+
+test('Qwen and quota panel use the same provider freshness limits', () => {
+  const data = sample();
+  data.quota.codex.observedAt = ms - 4 * minute;
+  data.quota.claude.observedAt = ms - 16 * minute;
+  data.quota.grok.observedAt = ms - 5 * 3600000;
+  const observed = observeUsage(data, {}, ms);
+  assert.equal(observed.usage.codex.quotaState, 'unavailable');
+  assert.equal(observed.usage.claude.quotaState, 'unavailable');
+  assert.equal(observed.usage.grok.quotaState, 'available');
+  assert.deepEqual(observed.usage.codex.windows, []);
 });
 
 test('reset schedules, deadlines, reordered windows and relative estimates are deduplicated', () => {
@@ -173,23 +196,23 @@ test('gradual increases accumulate over 30 minutes and unknown reset stays quiet
   assert.ok(!forProvider(afterGap, 'codex').some(e => e.type === 'usage-rise'));
 });
 
-test('only final usage sample is published after inference and the model gets numeric facts', async t => {
-  let data = sample(), clock = ms;
+test('usage facts publish directly without model-generated quota arithmetic', async t => {
+  let data = sample(), clock = ms, calls = 0;
   const reports = [];
-  let change = false, input;
   const watch = createQwenWatch({ store: { snapshot: () => ({ tasks: [{ id: QWEN_PREREQUISITE, status: 'done' }] }) }, now: () => clock,
     usageReader: async () => structuredClone(data), publishReport: async value => reports.push(value),
-    qwenClient: { run: async task => { input = JSON.parse(task.description); if (change) { clock += minute; data = sample(clock, 100); } return 'observed'; } } });
+    qwenClient: { run: async () => { calls++; return 'Invented reset deadline'; } } });
   t.after(() => watch.stop());
-  await watch.start(); clock += 5 * minute; data = sample(clock, 90); change = true;
+  await watch.start(); clock += 5 * minute; data = sample(clock, 100);
   await watch.tick();
-  assert.ok(input.facts.some(fact => fact.provider === 'codex' && fact.usage.remainingPercent === 10));
-  const codexEvents = reports.at(-1).events.filter(e => e.provider === 'codex');
+  assert.equal(calls, 0);
+  const report = reports.at(-1), codexEvents = report.events.filter(e => e.provider === 'codex');
   assert.ok(codexEvents.some(e => e.type === 'quota-exhausted'));
   assert.ok(!codexEvents.some(e => e.type === 'quota'));
   assert.equal(codexEvents.filter(e => e.type === 'usage-rise').length, 1);
+  assert.equal(report.usage.codex.windows[0].remainingPercent, 0);
+  assert.doesNotMatch(report.observation, /Invented/);
 });
-
 
 test('stop during an asynchronous usage read prevents late publication', async () => {
   let release, entered;

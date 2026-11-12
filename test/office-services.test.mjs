@@ -10,6 +10,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { officeServices } from '../server/office-services.mjs';
 import { createTaskStore } from '../server/task-store.mjs';
 import { QWEN_PREREQUISITE } from '../server/qwen-watch.mjs';
+import { createLocalQwen } from '../server/local-qwen.mjs';
+import { validateOfficeConfig } from '../server/office-config.mjs';
+import { createConfiguredUsage } from '../server/usage-bridge.mjs';
 
 async function eventually(check) {
   for (let attempt = 0; attempt < 80; attempt++) {
@@ -102,8 +105,8 @@ test('watch is resident in office services without browser polling and stops bef
   seed.updateTask(prerequisite.id, { status: 'done' });
   const original = seed.createTask({ title: 'Blocked fixture', projectPath: home }); seed.updateTask(original.id, { status: 'blocked' });
   seed.close();
-  let calls = 0, middleware;
-  const plugin = officeServices({ store: { home }, grokWake: { env: {} }, runner: { probeProviders: async () => ({}), env: {} }, grok: { home, env: {} }, watch: { projectPath: home, intervalMs: 15, usageReader: async () => ({ generatedAt: Date.now(), providers: [{ provider: 'Local Qwen', noQuota: true, todayTokens: 12345 }], quota: {} }), qwenClient: { run: async () => { calls++; return 'fixture observation'; } } } });
+  let calls = 0, modelCalls = 0, middleware;
+  const plugin = officeServices({ store: { home }, grokWake: { env: {} }, runner: { probeProviders: async () => ({}), env: {} }, grok: { home, env: {} }, watch: { projectPath: home, intervalMs: 15, usageReader: async () => { calls++; return { generatedAt: Date.now(), providers: [{ provider: 'Local Qwen', noQuota: true, todayTokens: 12345 }], quota: {} }; }, qwenClient: { run: async () => { modelCalls++; return 'fixture observation'; } } } });
   const server = createServer((req, res) => middleware(req, res, () => { res.statusCode = 404; res.end('{}'); }));
   plugin.configureServer({ httpServer: server, middlewares: { use(value) { middleware = value; } } });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -120,7 +123,7 @@ test('watch is resident in office services without browser polling and stops bef
   assert.ok(JSON.stringify(report).includes(original.id));
   assert.equal(board.tasks.find(x => x.id === original.id).status, 'blocked');
   await new Promise(resolve => server.close(resolve)); await plugin.closeBundle(); closed = true;
-  const stoppedAt = calls; await delay(40); assert.equal(calls, stoppedAt);
+  const stoppedAt = calls; await delay(40); assert.equal(calls, stoppedAt); assert.equal(modelCalls, 0, 'watch uses fresh deterministic facts without inference');
 });
 
 test('human questions are collected without a browser and wake acceptance never marks delivery', async t => {
@@ -150,4 +153,143 @@ test('human questions are collected without a browser and wake acceptance never 
   assert.equal(board.grokWake.configured, true); assert.ok(board.grokWake.lastSentAt);
   assert.ok(board.runtime.commandInterface.commands.includes('answer-question'));
   assert.ok(!JSON.stringify(board).includes('fixture-secret')); assert.ok(!JSON.stringify(board).includes('fixture-webhook'));
+});
+
+test('dispatch queue wakes Grok without API credentials, and only a real plan writeback becomes a reply', async t => {
+  const home = await mkdtemp(path.join(tmpdir(), 'office-dispatch-service-'));
+  const seed = createTaskStore({ home, crossReview: false });
+  seed.updateSettings({ autoPickup: false }); seed.close();
+  const events = []; let middleware;
+  const plugin = officeServices({ store: { home }, relayIntervalMs: 10,
+    runner: { probeProviders: async () => ({}), env: {} }, grok: { home, env: {} },
+    watch: { projectPath: home }, huddle: { qwenClient: { discussBlocked: async () => ({ suggestions: [] }) } },
+    grokWake: { env: {}, fetchImpl: async (_url, options) => { events.push(JSON.parse(options.body)); return new Response(null, { status: 204 }); } },
+  });
+  const server = createServer((req, res) => middleware(req, res, () => { res.statusCode = 404; res.end('{}'); }));
+  plugin.configureServer({ httpServer: server, middlewares: { use(value) { middleware = value; } } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); await plugin.closeBundle(); await rm(home, { recursive: true, force: true }); });
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const read = async () => (await fetch(origin + '/api/office/board')).json();
+  const initial = await read();
+  assert.equal(initial.dispatchSync.notification.configured, false);
+  const post = async (route, payload) => {
+    const res = await fetch(origin + route, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Office-Token': initial.csrfToken, Origin: origin }, body: JSON.stringify(payload) });
+    assert.ok(res.ok); return res.json();
+  };
+  await post('/api/office/grok/wake/config', { url: 'https://api2.cursor.sh/fixture-dispatch', token: 'fixture-dispatch-secret' });
+  assert.equal((await read()).dispatchSync.notification.configured, true);
+  const { instruction } = await post('/api/office/instructions', { text: 'Prepare a plan only', projectPath: home });
+  await eventually(() => events.length === 1);
+  const queued = await read();
+  assert.equal(events[0].event, 'office.instructions.pending'); assert.deepEqual(events[0].instructionIds, [instruction.id]);
+  assert.equal(events[0].officeUrl, origin);
+  assert.equal(queued.instructions[0].status, 'pending');
+  assert.equal(queued.dispatchSync.delivery[instruction.id].state, 'accepted');
+  assert.equal(queued.dispatchSync.botConnected, false);
+  await post(`/api/office/instructions/${instruction.id}/apply-plan`, { summary: 'The bot actually wrote this plan', roles: [], tasks: [] });
+  const replied = await read();
+  assert.equal(replied.instructions[0].status, 'done');
+  assert.equal(replied.instructions[0].summary, 'The bot actually wrote this plan');
+  await delay(30); assert.equal(events.length, 1);
+  assert.ok(!JSON.stringify(replied).includes('fixture-dispatch-secret'));
+});
+
+
+test('configured services and usage share the actual local worker and preserve disabled providers', async t => {
+  const home = await mkdtemp(path.join(tmpdir(), 'office-shared-qwen-'));
+  const configuration = validateOfficeConfig({ mode: 'enabled', dataDir: home, workspace: home,
+    providers: { 'local-qwen': { enabled: true } }, ollama: { model: 'fixture-qwen:9b' } });
+  const seed = createTaskStore({ home });
+  seed.updateSettings({ autoPickup: true, crossReview: false });
+  const card = seed.createTask({ title: 'Outline supplied request', provider: 'local-qwen', supportType: 'task-breakdown', description: 'Make an accessible task list.' });
+  seed.close();
+  let release, calls = 0, inFlight = 0, maxInFlight = 0;
+  const qwenClient = createLocalQwen({ model: 'fixture-qwen:9b', usageFile: path.join(home, 'qwen-usage.json'), fetchImpl: async (url, init) => {
+    if (!url.endsWith('/api/chat')) return new Response(JSON.stringify({ models: [{ name: 'fixture-qwen:9b' }] }));
+    calls++; inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+    try {
+      assert.equal(JSON.parse(init.body).model, 'fixture-qwen:9b');
+      return await new Promise(resolve => { release = () => resolve(new Response(JSON.stringify({ done: true, message: { content: 'Draft tasks with acceptance checks.' } }))); });
+    } finally { inFlight--; }
+  } });
+  let clock = Date.now();
+  const usage = createConfiguredUsage(configuration, qwenClient, { now: () => clock });
+  const foreignClient = { run() { throw new Error('Different client must not run.'); }, extractWorkReport() { throw new Error('Different client must not extract.'); } };
+  const plugin = officeServices({ configuration, qwenClient,
+    runner: { qwenClient: foreignClient, quotaReader: usage.quotaReader },
+    watch: { prerequisiteIds: ['fixture-disabled-watch'] },
+    workReports: { prerequisiteIds: ['fixture-disabled-reports'], qwenClient: foreignClient }, onStop: usage.stop,
+  });
+  let middleware;
+  const server = createServer((req, res) => middleware(req, res, () => { res.statusCode = 404; res.end('{}'); }));
+  plugin.configureServer({ httpServer: server, middlewares: { use(value) { middleware = value; } } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { release?.(); await new Promise(resolve => server.close(resolve)); await plugin.closeBundle(); await rm(home, { recursive: true, force: true }); });
+  await eventually(() => calls === 1);
+  const runningUsage = await usage.reader();
+  assert.equal(runningUsage.providers.length, 1);
+  assert.equal(runningUsage.providers[0].model, 'fixture-qwen:9b');
+  assert.equal(runningUsage.providers[0].busy, true);
+  assert.equal(runningUsage.providers[0].concurrency, 1);
+  assert.equal(runningUsage.providers[0].contextTokens, 32768);
+  await assert.rejects(qwenClient.extractWorkReport('[]'), /concurrency/);
+  const readBoard = () => fetch(`http://127.0.0.1:${server.address().port}/api/office/board`).then(r => r.json());
+  const activeBoard = await readBoard();
+  assert.equal(activeBoard.tasks.find(item => item.id === card.id).status, 'running');
+  assert.equal(activeBoard.grok.connected, false);
+  for (const provider of ['claude', 'codex', 'gemini']) assert.equal(activeBoard.runtime.providers[provider].available, false);
+  release();
+  await eventually(async () => (await readBoard()).tasks.find(item => item.id === card.id).status === 'done');
+  clock += 31000;
+  assert.equal((await usage.reader()).providers[0].busy, false);
+  assert.equal(calls, 1); assert.equal(maxInFlight, 1);
+});
+
+
+test('disabled local provider never consults an injected enabled client', async t => {
+  const home=await mkdtemp(path.join(tmpdir(),'office-disabled-injected-qwen-'));
+  const configuration=validateOfficeConfig({mode:'enabled',dataDir:home,workspace:home,providers:{'local-qwen':{enabled:false}},ollama:{model:'configured-disabled-model'}});
+  let calls=0,middleware;
+  const invoked=()=>{calls++;throw new Error('Disabled client must not be consulted.');};
+  const injected={model:'injected-enabled-model',runtimeState:invoked,probe:invoked,run:invoked,extractWorkReport:invoked,discussBlocked:invoked};
+  const plugin=officeServices({configuration,qwenClient:injected,runner:{qwenClient:injected}});
+  const server=createServer((req,res)=>middleware(req,res,()=>{res.statusCode=404;res.end('{}');}));
+  plugin.configureServer({httpServer:server,middlewares:{use(value){middleware=value;}}});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(async()=>{await new Promise(resolve=>server.close(resolve));await plugin.closeBundle();await rm(home,{recursive:true,force:true});});
+  const board=await (await fetch(`http://127.0.0.1:${server.address().port}/api/office/board`)).json();
+  assert.equal(board.runtime.providers['local-qwen'].available,false);
+  assert.equal(board.runtime.providers['local-qwen'].model,'configured-disabled-model');
+  assert.equal(board.runtime.providers['local-qwen'].busy,false);
+  assert.equal(board.qwenWatch.phase,'stopped');
+  assert.equal(calls,0);
+});
+
+test('continuous duty and huddle start while report inference is still pending', async t => {
+  const home = await mkdtemp(path.join(tmpdir(), 'office-independent-duty-'));
+  const seed = createTaskStore({ home, crossReview: false });
+  seed.updateSettings({ autoPickup: false });
+  const done = seed.createTask({ title: 'Completed fixture', projectPath: home, provider: 'codex' });
+  const doneClaim = seed.claimTask({ id: 'done-worker', provider: 'codex', projectPath: home }, { taskId: done.id });
+  seed.finishTask(done.id, doneClaim.claimToken, { status: 'done', result: 'Completed actual fixture result.' });
+  const blocked = seed.createTask({ title: 'Blocked fixture', projectPath: home, provider: 'codex' });
+  seed.updateTask(blocked.id, { status: 'blocked' });
+  seed.close();
+  let release, middleware, modelCalls = 0;
+  const qwenClient = { extractWorkReport: () => { modelCalls++; return new Promise(resolve => { release = () => resolve({ entries: [{ id: done.id, quoteIndex: 0, fileIndices: [] }] }); }); }, discussBlocked: () => assert.fail('autoPickup paused must not dispatch or discuss candidates') };
+  const plugin = officeServices({ store: { home }, grokWake: { env: {} }, runner: { probeProviders: async () => ({ 'local-qwen': { available: true, authenticated: true } }), env: {} }, grok: { home, env: {} },
+    watch: { projectPath: home, prerequisiteIds: [] }, workReports: { projectPath: home, prerequisiteIds: [], qwenClient }, huddle: { qwenClient }, duty: { intervalMs: 15 } });
+  const server = createServer((req, res) => middleware(req, res, () => { res.statusCode = 404; res.end('{}'); }));
+  plugin.configureServer({ httpServer: server, middlewares: { use(value) { middleware = value; } } });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { release?.(); await new Promise(resolve => server.close(resolve)); await plugin.closeBundle(); await rm(home, { recursive: true, force: true }); });
+  await eventually(() => modelCalls === 1);
+  const read = () => fetch(`http://127.0.0.1:${server.address().port}/api/office/board`).then(response => response.json());
+  const board = await eventually(async () => { const value = await read(); return value.qwenWatch.duty.checks >= 2 && value.huddle.lastCheckedAt && value; });
+  assert.equal(board.qwenWatch.duty.started, true); assert.ok(board.qwenWatch.duty.heartbeatAt);
+  assert.equal(board.qwenWatch.duty.phase, 'working'); assert.equal(board.workReportsSummary.phase, 'generating');
+  assert.equal(board.tasks.find(task => task.id === blocked.id).status, 'blocked');
+  assert.equal(board.runtime.running.length, 0); assert.equal(modelCalls, 1);
+  release(); await eventually(async () => (await read()).workReportsSummary.phase === 'ready');
 });

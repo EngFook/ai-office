@@ -406,3 +406,24 @@ test('maintenance preserves uncalled meeting agendas and delivery budget until r
   await meeting.receive(); assert.equal(calls, 3);
   assert.equal(f.store.blockedMeetings()[0].status, 'unresolved');
 });
+
+test('meeting votes cannot turn a read-only review or research task into implementation subtasks', async t => {
+  for (const input of [{ kind: 'review', reviewOf: 'original-implementation' }, { provider: 'gemini' }, { kind: 'resolution' }]) {
+    const f = await fixture(t), card = f.create(input);
+    const meeting = f.meetings({ decide: async () => [vote(card, { resolved: true, evidence: 'Proposed splitting, not authorization.', action: 'split', subtasks: [{ title: 'Change the implementation', description: 'A meeting must not authorize this.', provider: 'codex' }] })] });
+    await meeting.receive(report(f.now()));
+    assert.equal(f.store.snapshot().tasks.length, 1);
+    assert.equal(f.store.snapshot().tasks[0].status, 'blocked');
+  }
+});
+
+test('unanimous meeting votes cannot resume an approval-blocked card before user response', async t => {
+  const f = await fixture(t);
+  const card = f.store.createTask({ title: 'Deployment remains gated', provider: 'codex', projectPath: f.home });
+  const claim = f.store.claimTask({ id: 'original-worker', provider: 'codex', projectPath: f.home }, { taskId: card.id });
+  f.store.finishTask(card.id, claim.claimToken, { status: 'blocked', error: 'Waiting for user approval to deploy.' });
+  const meeting = f.meetings({ decide: async () => [vote(card, { resolved: true, evidence: 'AI consensus cannot grant approval.', action: 'retry' })] });
+  await meeting.receive(report(f.now()));
+  assert.equal(f.store.snapshot().tasks.find(task => task.id === card.id).status, 'blocked');
+  assert.equal(f.store.watchRetryAvailable(f.store.snapshot().tasks.find(task => task.id === card.id)), false);
+});

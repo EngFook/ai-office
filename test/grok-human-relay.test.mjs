@@ -86,6 +86,7 @@ test('metadata changes preserve question; manual scope edits stale old replies a
   f.store.syncHumanRequests(); assert.equal(f.store.snapshot().humanRequests[0].state, 'delivered');
   f.store.updateTask(task.id, { description: 'Changed scope with a different deployment.' });
   assert.throws(() => f.store.answerHumanRequest(request.id, f.reply(request)), /unanswered question/);
+  f.store.syncHumanRequests(); // Rejected replies no longer perform background writes.
   const all = f.store.snapshot().humanRequests;
   assert.equal(all.find(value => value.id === request.id).state, 'stale');
   assert.equal(all.filter(value => value.state === 'pending').length, 1);
@@ -193,13 +194,14 @@ test('info cannot change a usable project, approval cannot change paths, and res
   assert.equal(answered.task.projectPath, await realpath(restored)); assert.equal(answered.task.status, 'pending');
 });
 
-test('questions are not explicit approvals and conditional approvals retain exact constraints', async t => {
-  const f = await fixture(t), task = f.block(), request = f.request(task); f.ack(request);
+test('questions and unbound conditional approvals are rejected without widening legacy scope', async t => {
+  const f = await fixture(t, { now: () => Date.parse('2026-11-08T00:00:00Z') }), task = f.block(), request = f.request(task); f.ack(request);
   for (const userReply of ['可以吗？', '确认一下是否安全', 'Yes?', '同意吗', '可以不要部署吗？']) {
     assert.throws(() => f.store.answerHumanRequest(request.id, f.reply(request, { userReply })), /explicit affirmative/);
   }
-  const answer = f.store.answerHumanRequest(request.id, f.reply(request, { userReply: '同意，仅测试环境。' }));
-  assert.equal(answer.task.humanReply.userReply, '同意，仅测试环境。');
+  const before = f.store.snapshot();
+  assert.throws(() => f.store.answerHumanRequest(request.id, f.reply(request, { userReply: '同意，仅测试环境。' })), /explicit action binding/);
+  assert.deepEqual(f.store.snapshot(), before);
 });
 
 test('validated text-only local Qwen accepts info without a folder and keeps single-worker serialization', async t => {
@@ -367,14 +369,12 @@ test('re-request never lets Grok undo a previous information refusal, and repeat
   assert.equal(answered.task.status, 'pending', 'only a new user decision lifts the previous refusal');
 });
 
-test('office button action is distinct from typed conditions and Grok still needs literal explicit approval', async t => {
-  const { taskPrompt } = await import('../server/task-runner.mjs');
-  const f = await fixture(t), task = f.block(), q = f.request(task);
+test('office buttons cannot broaden typed conditions on legacy approvals', async t => {
+  const f = await fixture(t, { now: () => Date.parse('2026-11-08T00:00:00Z') }), task = f.block(), q = f.request(task);
   const condition = '仅测试环境，不要推 main，不要部署生产。';
-  const result = f.store.answerHumanRequest(q.id, { source: 'office-ui', replyAuthor: 'user', userAction: 'approve', decision: 'approve', userReply: condition, questionHash: q.questionHash, userMessageId: 'office-ui:conditional-approval' });
-  assert.equal(result.request.answer.userReply, condition); assert.equal(result.request.answer.userAction, 'approve');
-  assert.ok(taskPrompt(result.task).includes('userTypedText')); assert.ok(taskPrompt(result.task).includes(condition));
-  assert.ok(!taskPrompt(result.task).includes('verbatimReply'));
+  const before = f.store.snapshot();
+  assert.throws(() => f.store.answerHumanRequest(q.id, { source: 'office-ui', replyAuthor: 'user', userAction: 'approve', decision: 'approve', userReply: condition, questionHash: q.questionHash, userMessageId: 'office-ui:conditional-approval' }), /explicit action binding/);
+  assert.deepEqual(f.store.snapshot(), before);
   const another = f.block(), aq = f.request(another); f.ack(aq);
   assert.throws(() => f.store.answerHumanRequest(aq.id, f.reply(aq, { userReply: condition })), /explicit affirmative/);
 });

@@ -9,7 +9,7 @@ const residents = Object.entries(OFFICE_PROVIDERS).map(([key, value]) => ({
 }));
 const workers = Array.from({ length: 100 }, (_, index) => ({
   id: `real-worker:${index}`, provider: index < 80 ? 'Claude Code' : index < 92 ? 'Codex' : index < 96 ? 'Gemini' : index < 98 ? 'Grok' : 'Local Qwen',
-  liveStatus: 'working', runtimeAgents: [{ id: `session:${index}`, status: 'working', observed: true }],
+  liveStatus: 'working', runtimeAgents: [{ id: `session:${index}`, status: 'working', executionState: 'working', observed: true }],
 }));
 const coordinates = figures => Object.fromEntries(figures.map(figure => [figure.id, [figure.x, figure.z, figure.angle]]));
 

@@ -1,9 +1,13 @@
+import { grokUnblockingRole } from './shared-layout.js';
+import { isConfirmedExecution, officeRuntimeWorkers } from './claude-execution.js';
+
 export const SHARED_DEPARTMENTS = ['Claude Build Studio', 'Codex Review & Balance', 'Grok Dispatch', 'Gemini Research', 'Qwen Local Assistance'];
 
 // Routing and seat allocation continue to use the original role keys. Only
 // display labels change, so saved tasks and live actor metadata remain valid.
 export function officeRoleLabel(role, provider = '', worker = {}) {
   if (provider === 'Local Qwen' || provider === 'local-qwen') return 'Local Assistant';
+  if (grokUnblockingRole({ provider, role, runtimeAgents: [worker] })) return 'Grok Unblocking Coordinator';
   if (role === 'Manager' && /^(Grok|grok)$/.test(provider)) return 'Dispatch Lead';
   if (role === 'Researcher') return 'Research Analyst';
   if (role === 'Admin') return 'Coordinator';
@@ -21,6 +25,7 @@ export function officeRoleDescription(agent = {}) {
   if (agent.provider === 'Local Qwen') return 'Preliminary text assistance only; human verification required. No code, review or final deliverables.';
   if (agent.provider === 'Codex') return 'Reviews implementation, balances game systems and gives release sign-off.';
   if (agent.provider === 'Gemini') return 'Researches with read-only access; never reviews.';
+  if (grokUnblockingRole(agent)) return 'Investigates blockers, coordinates owners and verifies that work resumes.';
   if (agent.provider === 'Grok') return 'Coordinates requests and dispatches work to the team.';
   return 'Builds and implements the team’s projects.';
 }
@@ -70,10 +75,11 @@ export function codexOfficeRole(worker = {}) {
 function sanitizedWorker(original, provider, available) {
   const id = nativeId(original?.id);
   if (!id) return null;
-  const status = available ? (LIVE_STATUSES.has(original.status) ? original.status : 'idle') : 'offline';
-  const worker = { id, provider: provider.name, status, isSubagent: typeof original.isSubagent === 'boolean' ? original.isSubagent : null, observed: original.observed !== false };
-  for (const field of ['sessionId', 'agentType', 'name', 'tool', 'lastTool', 'lastToolOutcome', 'updatedAt', 'lastToolAt', 'skillId', 'agentRole', 'agentPath', 'parentSessionId', 'lastEvent', 'category']) {
-    const value = clean(original[field], field === 'sessionId' || field === 'parentSessionId' ? 512 : 400);
+  const sourceStatus = original.status === 'running' ? 'working' : original.status;
+  const status = available ? (LIVE_STATUSES.has(sourceStatus) ? sourceStatus : 'idle') : 'offline';
+  const worker = { id, provider: provider.name, status, isSubagent: typeof original.isSubagent === 'boolean' ? original.isSubagent : null, observed: original.observed === true };
+  for (const field of ['sessionId', 'agentType', 'name', 'tool', 'lastTool', 'lastToolOutcome', 'updatedAt', 'lastToolAt', 'skillId', 'agentRole', 'agentPath', 'parentSessionId', 'parentAgentId', 'agentId', 'source', 'lastEvent', 'category', 'executionState', 'activityPhase', 'lastEventAt', 'observationSource', 'evidenceExpiresAt']) {
+    const value = clean(original[field], ['sessionId', 'parentSessionId', 'parentAgentId', 'agentId'].includes(field) ? 512 : 400);
     worker[field] = value || null;
   }
   worker.cwd = clean(original.cwd, 2048);
@@ -113,7 +119,7 @@ export function buildSharedRoster(states = {}, seats = new Map()) {
     const skills = (Array.isArray(state.skills) ? state.skills : []).map(skillMetadata).filter(Boolean);
     for (const original of latestWorkers(state.agents)) {
       if (original.status === 'offline') continue;
-      const worker = sanitizedWorker(original, provider, available);
+      const worker = sanitizedWorker(original, provider, available || Array.isArray(state.runtimeVerifiedIds) && state.runtimeVerifiedIds.includes(original.id));
       if (!worker) continue;
       const skill = skills.find(item => item.id === worker.skillId) || null;
       const role = provider.key === 'codex' ? codexOfficeRole(worker) : provider.key === 'grok' ? worker.agentRole || 'Manager' : provider.key === 'gemini' ? 'Researcher' : provider.key === 'local-qwen' ? 'Helper' : 'Worker';
@@ -146,7 +152,7 @@ export function buildSharedRoster(states = {}, seats = new Map()) {
 }
 
 export function workingOfficeAgents(roster = []) {
-  return roster.filter(agent => agent.liveStatus === 'working' && agent.runtimeAgents?.some(worker => worker.status === 'working' && worker.observed !== false)).sort((a, b) => a.index - b.index);
+  return roster.filter(agent => officeRuntimeWorkers([agent]).some(isConfirmedExecution)).sort((a, b) => a.index - b.index);
 }
 
 export function resolveSharedSelection(roster = [], selected) {
@@ -176,14 +182,37 @@ export function migrateOfficeRecords(records) {
 // Runner identities originate in actual CLI session events. Match by native
 // session before overlaying activity so one worker never becomes two figures.
 export function withTaskWorkers(connection = {}, runtime = {}, provider) {
-  const workers = (runtime.agents || []).filter(worker => worker.provider === provider);
+  // These IDs are generated for this merge only, never accepted from a native
+  // response or a previous overlay after the board has become unavailable.
+  if (Object.hasOwn(connection, 'runtimeVerifiedIds')) {
+    const { runtimeVerifiedIds: ignored, ...nativeConnection } = connection;
+    connection = nativeConnection;
+  }
+  if (runtime.unavailable) return connection;
+  const workers = (runtime.agents || []).filter(worker => worker.provider === provider && worker.observed === true && worker.status !== 'offline');
   if (!workers.length) return connection;
-  const agents = [...(connection.agents || [])];
+  const nativeAvailable = officeBridgeAvailable(connection);
+  const agents = (connection.agents || []).map(agent => nativeAvailable ? agent : { ...agent, status: 'offline', tool: null });
+  const runtimeVerifiedIds = [];
   for (const worker of workers) {
-    const index = agents.findIndex(agent => agent.id === worker.id || (worker.sessionId && agent.sessionId === worker.sessionId && agent.isSubagent !== true));
-    const active = { ...worker, agentRole: worker.role === 'any' ? 'Helper' : worker.role || 'Helper' };
+    const index = agents.findIndex(agent => agent.id === worker.id || (worker.isSubagent !== true && agent.isSubagent !== true && worker.sessionId && agent.sessionId === worker.sessionId));
+    if (index >= 0 && worker.source === 'local-agent-heartbeat' && nativeAvailable && agents[index].source !== 'local-agent-heartbeat' && agents[index].observed === true && agents[index].status !== 'offline') continue;
+    const runner = [worker.agentType, worker.source, worker.observationSource].includes('office-task-runner');
+    const job = runtime.started === true && runner && typeof worker.taskId === 'string' && worker.taskId.trim() &&
+      (runtime.running || []).find(item => item.taskId === worker.taskId && !item.finished && (!item.status || ['working', 'running'].includes(item.status)) &&
+        (PROVIDERS.find(entry => entry.key === (item.provider === 'grok-bot' ? 'grok' : item.provider))?.name || item.provider) === provider &&
+        (item.workerId === worker.id || worker.isSubagent !== true && worker.sessionId && item.sessionId === worker.sessionId));
+    // A runner's own cached working claim cannot outlive its actual job. Other
+    // sources (for example a fresh leased heartbeat) carry separate evidence.
+    const running = ['working', 'running'].includes(worker.status);
+    const executionState = runner && running && !job ? 'unconfirmed' : worker.executionState ||
+      (runner && runtime.started === true && ['idle', 'waiting'].includes(worker.status) ? worker.status : job ? 'working' : 'unconfirmed');
+    const active = { ...worker, executionState, observationSource: worker.observationSource || worker.source || (job ? 'office-task-runner' : null), agentRole: worker.role === 'any' ? 'Helper' : worker.role || 'Helper' };
     if (index < 0) agents.push(active);
     else agents[index] = { ...agents[index], ...active, id: agents[index].id };
+    if (!nativeAvailable) runtimeVerifiedIds.push(index < 0 ? active.id : agents[index].id);
   }
-  return { ...connection, agents, connected: true, metadataAvailable: true, error: null };
+  // Runner evidence belongs only to its own identities. Keep native-source
+  // failures visible instead of making every cached native session live again.
+  return { ...connection, agents, runtimeVerifiedIds, ...(nativeAvailable ? { connected: agents.some(agent => agent.status !== 'offline') } : {}) };
 }

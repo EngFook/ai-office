@@ -84,9 +84,11 @@ test('linked reviews are paused on delete and a running review prevents parent d
   f.act(parent, 'delete');
   assert.equal(f.current(review.id).paused, true);
   assert.equal(f.store.claimTask(f.worker, { taskId: review.id }), null);
-  const parent2 = f.create('parent2');
-  const review2 = f.store.createTask({ title: 'review2', kind: 'review', reviewOf: parent2.id, projectPath: f.home, provider: 'codex' });
-  f.store.claimTask(f.worker, { taskId: review2.id });
+  let parent2 = f.create('parent2');
+  const originalClaim = f.store.claimTask(f.worker, { taskId: parent2.id });
+  parent2 = f.store.finishTask(parent2.id, originalClaim.claimToken, { status: 'done', result: 'Implementation completed.' });
+  const review2 = f.store.createTask({ title: 'review2', kind: 'review', reviewOf: parent2.id, projectPath: f.home, provider: 'claude' });
+  assert.ok(f.store.claimTask({ ...f.worker, id: 'independent-reviewer', provider: 'claude' }, { taskId: review2.id }));
   assert.throws(() => f.act(parent2, 'delete'), /关联排查或审查/);
 });
 
