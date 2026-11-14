@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { acquireDeploymentLock, createDeployer, validateReportReadiness } from '../scripts/merge-when-idle.mjs';
 import { createTaskStore } from '../server/task-store.mjs';
-import { createQwenWorkReports, WORK_REPORT_PREREQUISITES } from '../server/qwen-work-reports.mjs';
+import { createQwenWorkReports } from '../server/qwen-work-reports.mjs';
+const WORK_REPORT_PREREQUISITES = ['report-ready-a', 'report-ready-b'];
 
 function fixture(t, options = {}) {
   const directory = mkdtempSync(path.join(tmpdir(), 'idle-merge-test-'));
@@ -191,7 +192,7 @@ test('report readiness verifies a real generated batch and rejects cache loss, c
   const facts = WORK_REPORT_PREREQUISITES.map(id => ({ id, status: 'done', provider: 'grok-bot' }));
   facts.push({ id: 'completed', status: 'done', provider: 'codex', title: 'done', result: '修改 source.mjs 完成。', updatedAt: '2026-11-03T00:00:00.000Z', completionSource: 'agent' });
   facts.push({ id: 'legacy-completed', status: 'done', provider: 'codex', title: 'legacy done', result: '历史完成记录。', updatedAt: '2026-11-02T00:00:00.000Z' });
-  const reports = createQwenWorkReports({ store: { snapshot: () => ({ tasks: facts }) }, projectPath: f.root, qwenClient: { extractWorkReport: async source => ({ entries: JSON.parse(source).map(task => ({ id: task.id, quoteIndex: 0, fileIndices: [] })) }) } });
+  const reports = createQwenWorkReports({ store: { snapshot: () => ({ tasks: facts }) }, prerequisiteIds: WORK_REPORT_PREREQUISITES, projectPath: f.root, qwenClient: { extractWorkReport: async source => ({ entries: JSON.parse(source).map(task => ({ id: task.id, quoteIndex: 0, fileIndices: [] })) }) } });
   t.after(() => reports.stop());
   const status = await reports.start();
   assert.equal(status.providers.find(group => group.provider === 'codex').tasks.find(task => task.id === 'legacy-completed').completionSource, 'unknown');

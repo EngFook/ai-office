@@ -1,3 +1,4 @@
+import { crowdCapacity } from './crowd-capacity.js'
 import React, { Suspense, createContext, lazy, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js'
@@ -11,7 +12,8 @@ import { claudeWorkerIdentity } from './claude-office'
 import { createMovement } from './movement'
 import { createSharedLayout, sharedSeatForAgent, sharedFocusArea, OFFICE_PROVIDERS, WORKSTATION_GEOMETRY } from './shared-layout'
 import { officeAgentLabel, officeRoleLabel } from './unified-office'
-import { t } from './i18n'
+import { t, useLang } from './i18n'
+import { isConfirmedExecution } from './claude-execution.js'
 import { personAppearance, shadowHeightFor, hashIndex } from './person-appearance'
 import { seatedMotion, walkMotion, isGlancing, clampHeadYaw, relativeYaw, stepHeadYaw, GLANCE_RADIUS, blinkScale, nodMotion, isChatting, CHAT_NOD } from './person-motion'
 import { createBakedContactShadows } from './baked-contact-shadows'
@@ -19,7 +21,7 @@ import { figuresV8aEnabled } from './figure-vat'
 import { PROP_PALETTE } from './desk-prop-data'
 import { propPlacements, buildPropGeometry, propPickHandler, CODE_W, CODE_H, CODE_LINE, CODE_BG, drawCodeLine, shouldStepCode, steamParticle, STEAM_COUNT } from './desk-props'
 import CharacterSwitch from './CharacterSwitch.jsx'
-import WoodFloor from './WoodFloor.jsx'
+import CarpetFloor from './CarpetFloor.jsx'
 import { StudioEnvelope, ZonePlatforms, StudioDataScreen, StudioSoftFurnishings } from './StudioDesign.jsx'
 import CentralSocial from './CentralSocial.jsx'
 import { residentFigures } from './office-resident-layout.js'
@@ -31,7 +33,7 @@ const BakedContactShadows = createBakedContactShadows(ContactShadows)
 
 const WOOD = '#634536', BRASS = '#b99a64', INK = '#272525'
 const { chairOffsetZ, monitorZ, screenZ } = WORKSTATION_GEOMETRY
-const workingRuntimeFor = agent => agent.runtimeAgents.find(worker => worker.status === 'working' && worker.observed !== false)
+const workingRuntimeFor = agent => agent.runtimeAgents.find(isConfirmedExecution)
 const identityFor = agent => agent.provider === 'Codex' ? codexWorkerIdentity(workingRuntimeFor(agent)) : claudeWorkerIdentity(workingRuntimeFor(agent))
 const providerKeyFor = value => ({ 'Claude Code': 'claude', Codex: 'codex', Grok: 'grok', Gemini: 'gemini', 'Local Qwen': 'local-qwen' })[value] || (OFFICE_PROVIDERS[value] ? value : null)
 const providerFor = item => OFFICE_PROVIDERS[providerKeyFor(item.provider) || providerKeyFor(item.officeZone) || providerKeyFor(item.zone)] || OFFICE_PROVIDERS.grok
@@ -231,7 +233,7 @@ function Workstations({ layout, focus, onFocus, onSelectAgent, onSelectArea }) {
 // Real work controls active counts; a bounded decorative idle pool adds traffic.
 // Every person on the floor (working, reviewing, researching, meeting, reporting, resting)
 // is drawn here and walks along the aisles whenever its state changes.
-const PEOPLE_CAP = 160
+
 // V4 eye placement in the head's local frame (head sphere radius .205): the
 // beads sit on the face surface just below the hair-cap rim (the cap reaches
 // theta .52*PI, i.e. y ~ -.013), so they read on the face, not in the hair.
@@ -246,6 +248,8 @@ function makeBlobTexture() {
   return new THREE.CanvasTexture(canvas)
 }
 function People({ layout, meeting, onArrived, onSelectAgent, residents = [], onSelectProvider, ambient = true }) {
+  const [PEOPLE_CAP, setCapacity] = useState(160)
+  const renderedOrder = useRef('')
   const movement=useMemo(()=>createMovement({ lounge: layout.lounge, commons: layout.commons }),[])
   const first=useRef(true), figuresRef=useRef([]), arrivedKey=useRef('')
   const refs=[useRef(),useRef(),useRef(),useRef(),useRef(),useRef(),useRef()]
@@ -264,11 +268,14 @@ function People({ layout, meeting, onArrived, onSelectAgent, residents = [], onS
   const distantGate=useRef(0), projected=useMemo(()=>new THREE.Vector3(),[])
   useEffect(()=>{
     const working=layout.agents.map(agent=>{ const desk=sharedSeatForAgent(agent,layout); return desk && { id: agent.id, agent, provider: providerKeyFor(agent.provider) || desk.provider, desk } }).filter(Boolean)
-    figuresRef.current=[...residentFigures(residents), ...movement.sync({ working, meeting, ambient, now: performance.now(), initial: first.current })]
+    movement.sync({ working, meeting, ambient, now: performance.now(), initial: first.current })
     first.current=false
   },[layout,meeting,movement,ambient,residents])
   useFrame(({clock,camera})=>{
     const now=performance.now(), figures=[...residentFigures(residents), ...movement.step(now)]
+    if (figures.length > PEOPLE_CAP) { setCapacity(crowdCapacity(figures.length, PEOPLE_CAP)); return }
+    const order = figures.map(f => f.id).join('|'), forceRefresh = renderedOrder.current !== order
+    renderedOrder.current = order
     figuresRef.current=figures
     const arrived=figures.filter(f=>f.agent&&!f.walking&&!f.queue.length&&f.spot?.id?.startsWith('desk:')).map(f=>f.id).sort().join('|')
     if(arrived!==arrivedKey.current){arrivedKey.current=arrived;onArrived?.(new Set(arrived?arrived.split('|'):[]))}
@@ -281,7 +288,7 @@ function People({ layout, meeting, onArrived, onSelectAgent, residents = [], onS
     if(headYaws.size>PEOPLE_CAP*2)headYaws.clear()
     figures.slice(0,PEOPLE_CAP).forEach((f,i)=>{
       // A throttled figure keeps last frame's matrices for at most 1/distantHz.
-      if(skipDistant){
+      if(skipDistant && !forceRefresh){
         projected.set(f.x,1.2,f.z).project(camera)
         if(Math.abs(projected.x)>.72||Math.abs(projected.y)>.72)return
       }
@@ -434,7 +441,7 @@ function WorkingPeople({ layout, focus, onSelectAgent, arrived }) {
           <capsuleGeometry args={[.67,2,4,8]}/><meshBasicMaterial transparent opacity={0} depthWrite={false} colorWrite={false}/>
         </mesh>
         {showLabel&&<SceneLabel position={[0,2.85,0]} avoidCollisions priority={selected ? 6 : 2} zIndexRange={[32,0]} style={{pointerEvents:'auto'}}>
-          <button type="button" data-no-i18n className={`agent-marker provider-${providerKeyFor(agent.provider) || seat.provider}${selected ? ' is-selected' : ''}`} data-runtime-id={workingRuntimeFor(agent).id} data-agent-id={agent.id} data-agent-status="running" data-provider={agent.provider} style={{'--provider-color':provider.marker}} title={`${displayName} · ${agent.provider} · ${t(officeRoleLabel(agent.role, agent.provider, workingRuntimeFor(agent)))}\n${project} · ${t('Running')}`} aria-label={t('Open {a}, {p}, agent {i}, Running, {r}').replace('{a}', displayName).replace('{p}', agent.provider).replace('{i}', shortId).replace('{r}', project)} onClick={select} onPointerEnter={()=>hoverWorker(agent.id)} onPointerLeave={unhover}><i/><code>{shortId}</code></button>
+          <button type="button" data-no-i18n className={`agent-marker provider-${providerKeyFor(agent.provider) || seat.provider}${selected ? ' is-selected' : ''}`} data-runtime-id={workingRuntimeFor(agent).id} data-agent-id={agent.id} data-agent-status={workingRuntimeFor(agent).executionState === 'unconfirmed' ? 'recorded-active' : 'running'} data-provider={agent.provider} style={{'--provider-color':provider.marker}} title={`${displayName} · ${agent.provider} · ${t(officeRoleLabel(agent.role, agent.provider, workingRuntimeFor(agent)))}\n${project} · ${workingRuntimeFor(agent).executionState === 'unconfirmed' ? t('Activity recorded') : t('Running')}`} aria-label={t(workingRuntimeFor(agent).executionState === 'unconfirmed' ? 'Open {a}, {p}, agent {i}, activity recorded, {r}' : 'Open {a}, {p}, agent {i}, Running, {r}').replace('{a}', displayName).replace('{p}', agent.provider).replace('{i}', shortId).replace('{r}', project)} onClick={select} onPointerEnter={()=>hoverWorker(agent.id)} onPointerLeave={unhover}><i/><code>{shortId}</code></button>
         </SceneLabel>}
       </group>
     })}
@@ -633,7 +640,7 @@ function Architecture({ layout }) {
   const {bounds}=layout, back=bounds.z-bounds.depth/2,left=bounds.x-bounds.width/2,right=bounds.x+bounds.width/2
   return <group>
     <StudioEnvelope layout={layout} Boxes={Boxes}/>
-    <WoodFloor bounds={bounds}/>
+    <CarpetFloor bounds={bounds}/>
     <ZonePlatforms layout={layout} Boxes={Boxes}/>
     <StudioDataScreen layout={layout} Boxes={Boxes}/>
     <StudioSoftFurnishings layout={layout} Boxes={Boxes}/>
@@ -648,17 +655,18 @@ function Architecture({ layout }) {
 // the flag on; the default path is untouched.
 const RealisticPeopleLazy = lazy(() => import('./RealisticPeople.jsx'))
 
-function SharedOffice({ residents, onSelectProvider, layout, focus, onFocus, onSelectAgent, onSelectArea, pendingTaskCount, geminiNeedsLogin = false, meeting = null, ambient = true }) {
+function SharedOffice({ residents, onSelectProvider, layout, focus, onFocus, onSelectAgent, onSelectArea, pendingTaskCount, blockedTaskCount, huddle, geminiNeedsLogin = false, meeting = null, ambient = true }) {
+  const zh = useLang() === 'zh'
   const [arrived,setArrived]=useState(()=>new Set())
   const realisticFigures=useMemo(()=>typeof window!=='undefined'&&figuresV8aEnabled({search:window.location.search,storage:window.localStorage}),[])
   return <group>
     <Architecture layout={layout}/>
     {layout.zones.map((zone,index)=><group key={zone.id}>
-      <Sign quietOnMobile position={[zone.x,5.4,zone.z-zone.depth/2+2]} onClick={()=>onFocus?.(`department-${index}`)} selected={focus===`department-${index}`} caption={zone.id==='gemini'&&geminiNeedsLogin?`Sign-in needed · ${zone.deskCount} pods`:`${zone.workingCount} working · ${zone.deskCount} ${zone.deskCount===1?'pod':'pods'}`}>{zone.department}</Sign>
+      <Sign quietOnMobile position={[zone.x,5.4,zone.z-zone.depth/2+2]} onClick={()=>onFocus?.(`department-${index}`)} selected={focus===`department-${index}`} caption={`${zone.id==='gemini'&&geminiNeedsLogin ? (zh?'需要登录 · ':'Sign-in needed · ') : ''}${zone.workingCount} ${zh?'运行中':'running'}${zone.unconfirmedCount ? ` · ${zone.unconfirmedCount} ${zh?'待确认':'unconfirmed'}` : ''} · ${zone.deskCount} ${zh?'工位':zone.deskCount===1?'desk':'desks'}`}>{zone.department}</Sign>
       {zone.id==='grok'&&<ManagerRoom zone={zone} selected={focus===`department-${index}`} onSelectArea={onSelectArea}/>}
     </group>)}
     <Workstations layout={layout} focus={focus} onFocus={onFocus} onSelectAgent={onSelectAgent} onSelectArea={onSelectArea}/>
-    <CentralSocial area={layout.centralSocial} pendingTaskCount={pendingTaskCount} onTasks={()=>onSelectArea?.('tasks')}/>
+    <CentralSocial area={layout.centralSocial} blockedTaskCount={blockedTaskCount} huddle={huddle} onTasks={()=>onSelectArea?.('blocked')}/>
     <Lounge lounge={layout.lounge} focus={focus} onFocus={onFocus}/>
     <Commons pendingTaskCount={pendingTaskCount} layout={layout} focus={focus} onFocus={onFocus} onSelectArea={onSelectArea}/>
     {realisticFigures
@@ -795,7 +803,7 @@ export default function OfficeScene({ residents = [], onSelectProvider, agents =
       <OfficeLighting bounds={layout.bounds}/>
       {/* Low-res HDR environment: soft reflections and fill light, loaded once. */}
       <Suspense fallback={null}><Environment files={SCENE_ENV_URL} environmentIntensity={SCENE_ENV_INTENSITY}/></Suspense>
-      <Suspense fallback={null}><SharedOffice residents={residents} onSelectProvider={onSelectProvider} ambient={!reducedMotion} meeting={board?.meeting||null} geminiNeedsLogin={board?.runtime?.providers?.gemini?.needsLogin===true} pendingTaskCount={pendingTaskCount} layout={layout} focus={focus} onFocus={onFocus} onSelectAgent={onSelectAgent} onSelectArea={onSelectArea}/></Suspense>
+      <Suspense fallback={null}><SharedOffice residents={residents} onSelectProvider={onSelectProvider} ambient={!reducedMotion} meeting={board?.meeting||null} geminiNeedsLogin={board?.runtime?.providers?.gemini?.needsLogin===true} pendingTaskCount={pendingTaskCount} blockedTaskCount={(board?.tasks||[]).filter(task=>task.status==='blocked').length} huddle={board?.huddle} layout={layout} focus={focus} onFocus={onFocus} onSelectAgent={onSelectAgent} onSelectArea={onSelectArea}/></Suspense>
       {/* Baked once (frames=1): ambient ground contact under furniture, no per-frame cost.
           Sits above the carpet pile (.041). The memo
           boundary takes scalars only so poll/focus rerenders cannot rebake or realloc. */}

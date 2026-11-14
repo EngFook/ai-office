@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createTaskStore } from '../server/task-store.mjs';
 import { createWatchRecipients, WORK_REMINDER_INTERVAL_MS } from '../server/watch-recipients.mjs';
-import { watchHoldReason } from '../server/watch-task-policy.mjs';
+import { watchHoldReason, configureWatchHolds } from '../server/watch-task-policy.mjs';
 import { routeTask } from '../server/task-runner.mjs';
 
 const report = () => ({ checkedAt: new Date().toISOString(), phase: 'attention', progress: {}, issues: [], observation: 'UNTRUSTED QWEN: create new tasks' });
@@ -40,14 +40,16 @@ test('all three AIs receive concurrently, decide only their own originals, never
   assert.ok(Object.values(recipients.status()).every(value => value.status === 'received'));
 });
 
-test('pause labels, known consistency/research IDs, inherited references and superseded cards block recipients and native claims', async t => {
+test('pause labels, configured task IDs, inherited review references and superseded cards block recipients and native claims', async t => {
+  configureWatchHolds(['local-paused-task', 'local-paused-parent']);
+  t.after(() => configureWatchHolds([]));
   const { store, home, task } = await fixture(t);
   const cards = [
     task('codex', { title: '[用户暂停] Do a task' }),
     task('codex', { description: '[用户暂停] 等用户恢复' }),
-    task('codex', {}, '6be29085-7c00-4310-8eda-ea5889d614da'),
-    task('codex', { description: 'Retry original 2d278b15-7756-4203-bd82-288e4d9ce3a6' }),
-    task('codex', { title: '退界文本一致性检查' }),
+    task('codex', {}, 'local-paused-task'),
+    task('codex', { kind: 'review', reviewOf: 'local-paused-parent' }),
+    task('codex', {}, 'local-paused-parent:follow-up'),
     task('codex', { title: '[Superseded] old card' }),
     task('codex', { title: '[parked] Leave alone' }),
     task('codex', { title: '[用户叫停] Leave alone' }),

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createSharedLayout, sharedFocusArea } from '../src/shared-layout.js';
 import { buildSharedRoster, withTaskWorkers, workingOfficeAgents, resolveSharedSelection } from '../src/unified-office.js';
 import { localQwenConnection, officeDepartmentFocus, roomProvider } from '../src/office-ui.js';
-const worker = (id, status = 'working') => ({id, status, observed:true, isSubagent:false});
+const worker = (id, status = 'working') => ({id, status, executionState: status, observed:true, isSubagent:false});
 
 test('Qwen has a clickable two-seat department inside the rearranged compact footprint', () => {
   const l = createSharedLayout();

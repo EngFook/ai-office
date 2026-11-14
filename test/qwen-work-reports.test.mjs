@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile, readFile, stat, symlink, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createQwenWorkReports, createWorkReportFile, validateWorkExtract, WORK_REPORT_PREREQUISITES, workReportSource } from '../server/qwen-work-reports.mjs';
+import { createQwenWorkReports, createWorkReportFile, validateWorkExtract, workReportSource } from '../server/qwen-work-reports.mjs';
+const WORK_REPORT_PREREQUISITES = ['report-ready-a', 'report-ready-b'];
 import { createLocalQwen } from '../server/local-qwen.mjs';
 
 const prerequisites = () => WORK_REPORT_PREREQUISITES.map(id => ({ id, status: 'done', provider: 'grok' }));
@@ -17,7 +18,7 @@ async function fixture(t) {
 function setup(t, options = {}) {
   let tasks = [...prerequisites(), card()]; let calls = 0;
   const writes = []; let saved = null;
-  const service = createQwenWorkReports({ projectPath: '/mock',
+  const service = createQwenWorkReports({ projectPath: '/mock', prerequisiteIds: WORK_REPORT_PREREQUISITES,
     store: { snapshot(options) { assert.deepEqual(options, { recoverLeases: false }); return { tasks }; } },
     file: { async read() { return saved; }, async write(value) { writes.push(value); saved = value; } },
     qwenClient: { async extractWorkReport(source) { calls++; return { entries: JSON.parse(source).map(task => ({ id: task.id, quoteIndex: 0, fileIndices: task.files.map((_, index) => index) })) }; } }, ...options });
@@ -35,6 +36,12 @@ test('both prerequisites gate extraction; actual assignee groups only completed 
   assert.deepEqual(result.providers.map(p => p.tasks.length), [1, 1, 1, 1]);
   assert.equal(result.providers[1].tasks[0].sourceResult, tasks[1].result);
   await f.service.tick(); assert.equal(f.calls, 1, 'unchanged tasks reuse validated cache');
+});
+
+test('configured fresh office extracts work without historical prerequisite cards', async t => {
+  const f=setup(t,{prerequisiteIds:[]});f.setTasks([card()]);
+  assert.equal((await f.service.start()).phase,'ready');
+  assert.equal(f.calls,1);
 });
 
 test('rejects paraphrases, fabricated files, duplicate IDs and missing source quotes', () => {
@@ -63,12 +70,18 @@ test('file persistence survives restart; invalid history and symlinks remain unt
   await symlink(outside, filename); await assert.rejects(file.write(saved)); assert.equal(await readFile(outside, 'utf8'), 'untouched');
 });
 
-test('restart caches are revalidated; offline status retains source records without inventing Qwen output', async t => {
-  let calls = 0; const saved = { entries: [{ ...extract(card()), fingerprint: 'wrong' }] };
-  const f = setup(t, { file: { read: async () => saved }, qwenClient: { async extractWorkReport() { calls++; throw new Error('offline'); } } });
-  const result = await f.service.start(); assert.equal(result.phase, 'unavailable');
-  assert.equal(result.providers[1].tasks[0].extracted, false); assert.equal(calls, 1);
-  assert.equal(result.providers[1].tasks[0].sourceResult, card().result);
+test('restart caches are revalidated; offline model falls back to labeled exact source excerpts', async t => {
+  let calls = 0, persisted; const saved = { entries: [{ ...extract(card()), fingerprint: 'wrong' }] };
+  const f = setup(t, { file: { read: async () => saved, write: async value => { persisted = value; } }, qwenClient: { model: 'fixture:9b', async extractWorkReport() { calls++; throw new Error('offline'); } } });
+  const result = await f.service.start(); assert.equal(result.phase, 'ready');
+  const record = result.providers[1].tasks[0];
+  assert.equal(record.extracted, true); assert.equal(record.extractionSource, 'source-fallback'); assert.equal(calls, 1);
+  assert.equal(record.quote, card().result); assert.equal(record.sourceResult, card().result);
+  assert.match(result.notice, /系统原文摘录/); assert.equal(result.model, 'fixture:9b');
+  assert.deepEqual(result.counts, { totalLogs: 0, totalTasks: 1, extractedTasks: 1, pendingTasks: 0, sourceFallbackTasks: 1 });
+  assert.equal(persisted.entries[0].extractionSource, 'source-fallback');
+  assert.equal(validateWorkExtract({ entries: persisted.entries }, [card()]).length, 1);
+  await f.service.tick(); assert.equal(calls, 1, 'unchanged exact-source fallback does not retry forever');
 });
 
 test('concurrent ticks coalesce; a task retried during inference loses its stale extract', async t => {
@@ -93,12 +106,12 @@ test('large results use bounded source and preserve the full original; failed sa
 
 test('extractor is pinned to local Ollama, serializes with assistance, aborts and rejects truncated responses', async t => {
   const root = await fixture(t); let body, signal;
-  const client = createLocalQwen({ usageFile: path.join(root, 'usage.json'), fetchImpl: async (url, init) => {
+  const client = createLocalQwen({ model: 'fixture-model:small', usageFile: path.join(root, 'usage.json'), fetchImpl: async (url, init) => {
     assert.equal(url, 'http://localhost:11434/api/chat'); body = JSON.parse(init.body); signal = init.signal;
     return new Response(JSON.stringify({ done: true, message: { content: JSON.stringify({ entries: [] }) } }));
   } });
   assert.deepEqual(await client.extractWorkReport('[{"id":"one","result":"事实"}]'), { entries: [] });
-  assert.equal(body.model, 'hermes-daily:9b'); assert.equal(body.think, false); assert.equal(body.format, 'json'); assert.equal(body.tools, undefined); assert.ok(signal);
+  assert.equal(body.model, 'fixture-model:small'); assert.equal(body.think, false); assert.equal(body.format, 'json'); assert.equal(body.tools, undefined); assert.ok(signal);
   const bad = createLocalQwen({ fetchImpl: async () => new Response(JSON.stringify({ done: true, done_reason: 'length', message: { content: '{}' } })) });
   await assert.rejects(bad.extractWorkReport('[]'), /incomplete/);
   let entered; const gate = new Promise(resolve => { entered = resolve; });
@@ -137,9 +150,86 @@ test('file candidates exclude referenced paths and support explicit changed-file
   assert.equal(workReportSource({ id: 't', result: '建议修改 server/a.mjs。' }).files.length, 0);
 });
 
-test('local contention schedules an offset retry rather than colliding with watcher forever', async t => {
+test('busy local model archives exact source without retrying inference every thirty seconds', async t => {
   const ms = Date.parse('2026-11-03T01:00:00Z');
   const f = setup(t, { now: () => ms, qwenClient: { async extractWorkReport() { throw new Error('Local Qwen concurrency is 1.'); } } });
   await f.service.start();
-  assert.equal(f.service.status().nextCheckAt, new Date(ms + 30000).toISOString());
+  assert.equal(f.service.status().phase, 'ready');
+  assert.equal(f.service.status().nextCheckAt, new Date(ms + 300000).toISOString());
+  assert.equal(f.service.status().counts.sourceFallbackTasks, 1);
+});
+
+test('invalid model selection is discarded and fallback keeps only original text and file evidence', async t => {
+  const task = card();
+  const f = setup(t, { qwenClient: { async extractWorkReport() { return { entries: [{ id: task.id, quoteIndex: 500, fileIndices: [5], quote: 'invented approval', files: ['fake.mjs'] }] }; } } });
+  const result = await f.service.start();
+  assert.equal(result.phase, 'ready');
+  const record = result.providers[1].tasks[0];
+  assert.equal(record.quote, task.result); assert.equal(record.extractionSource, 'source-fallback');
+  assert.deepEqual(record.files, workReportSource(task).files);
+  assert.equal(JSON.stringify(f.writes).includes('invented'), false);
+});
+
+test('fallback is revalidated against retried tasks and stop aborts without saving fallback', async t => {
+  let entered, release;
+  const started = new Promise(resolve => { entered = resolve; });
+  const f = setup(t, { qwenClient: { async extractWorkReport(_source, { signal }) {
+    entered(); await new Promise(resolve => { release = resolve; signal.addEventListener('abort', resolve, { once: true }); });
+    throw new Error('busy');
+  } } });
+  const starting = f.service.start(); await started;
+  const stopping = f.service.stop(); release(); await Promise.all([starting, stopping]);
+  assert.equal(f.writes.length, 0); assert.equal(f.service.status().phase, 'stopped');
+  const g = setup(t, { qwenClient: { async extractWorkReport() { g.setTasks([...prerequisites(), { ...card(), status: 'running' }]); throw new Error('offline'); } } });
+  const result = await g.service.start();
+  assert.equal(result.counts.totalTasks, 0); assert.deepEqual(g.writes[0].entries, []);
+});
+
+test('cache failures are distinct from model availability and counts retain verified records', async t => {
+  const readFailure = setup(t, { file: { read: async () => { throw new Error('private path'); } } });
+  const unreadable = await readFailure.service.start();
+  assert.equal(unreadable.phase, 'unavailable'); assert.match(unreadable.error, /读取报告缓存/); assert.equal(unreadable.error.includes('private path'), false);
+  const saveFailure = setup(t, { file: { read: async () => null, write: async () => { throw new Error('private path'); } } });
+  const unsaved = await saveFailure.service.start();
+  assert.equal(unsaved.phase, 'unavailable'); assert.match(unsaved.error, /保存新摘录/);
+  assert.deepEqual(unsaved.counts, { totalLogs: 0, totalTasks: 1, extractedTasks: 0, pendingTasks: 1, sourceFallbackTasks: 0 });
+});
+
+
+test('empty and whitespace-only results archive an empty source excerpt, never invented completion text', async t => {
+  for (const result of ['', '  \n\t']) {
+    const f = setup(t, { qwenClient: { async extractWorkReport() { throw new Error('offline'); } } });
+    f.setTasks([...prerequisites(), { ...card(), result }]);
+    const state = await f.service.start();
+    assert.equal(state.phase, 'ready');
+    const record = state.providers[1].tasks[0];
+    assert.equal(record.quote, ''); assert.equal(record.sourceResult, result);
+    assert.deepEqual(record.files, []); assert.equal(record.extractionSource, 'source-fallback');
+  }
+});
+
+
+test('fallback from more than twelve changed files stays within the already-bounded source evidence', async t => {
+  const task = { ...card('many-files'), result: Array.from({length:20}, (_,i) => `新增 src/file-${i}.mjs。`).join('\n') };
+  const source = workReportSource(task);
+  assert.equal(source.files.length,12);
+  const f = setup(t,{qwenClient:{async extractWorkReport(){throw new Error('offline');}}});
+  f.setTasks([...prerequisites(),task]);
+  const state = await f.service.start();
+  assert.equal(state.phase,'ready');
+  const record = state.providers.find(group=>group.provider==='codex').tasks[0];
+  assert.equal(record.extractionSource,'source-fallback');
+  assert.deepEqual(record.files,source.files);
+  assert.equal(validateWorkExtract({entries:[{id:task.id,quote:record.quote,files:record.files}]},[task]).length,1);
+});
+
+test('source failure after a successful initial cache read is not mislabeled a cache failure', async t => {
+  let snapshots=0,reads=0;
+  const f=setup(t,{store:{snapshot(){if(++snapshots>1)throw new Error('private source unavailable');return {tasks:[...prerequisites(),card()]};}},
+    file:{async read(){reads++;return null;},async write(){assert.fail('must not publish stale source');}}});
+  const state=await f.service.start();
+  assert.equal(reads,1);
+  assert.equal(state.phase,'unavailable');
+  assert.match(state.error,/任务记录暂不可用/);
+  assert.doesNotMatch(state.error,/读取报告缓存|private source/);
 });

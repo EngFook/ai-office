@@ -26,3 +26,18 @@ test('question actions bind explicit choices, preserve typed conditions and keep
   assert.equal(questionActionPayload(info, 'provide_info', 'Use /tmp/project', '/tmp/project').projectPath, '/tmp/project');
   assert.match(questionErrorMessage('Question binding does not match.'), /问题已更新/);
 });
+
+
+test('scoped approval needs explicit text while denial stays immediate and verbatim input survives', async () => {
+  const { questionActionPayload, questionErrorMessage } = await import('../src/human-relay-ui.js');
+  const request = { questionHash: 'scoped-question', kind: 'approval', approvalScope: { action: 'prepare_sanitized_snapshot' } };
+  assert.throws(() => questionActionPayload(request, 'approve'), /同意净化准备方案/);
+  assert.throws(() => questionActionPayload(request, 'approve', '  ', '', false), /type/);
+  const actual = '  同意净化准备方案，不批准最终合并。  ';
+  assert.equal(questionActionPayload(request, 'approve', actual).userReply, actual);
+  const denied = questionActionPayload(request, 'deny');
+  assert.equal(denied.userReply, ''); assert.equal(denied.userAction, 'deny'); assert.equal(denied.questionHash, request.questionHash);
+  assert.match(questionErrorMessage('Scoped approval requires an explicit affirmative reply naming sanitized snapshot preparation'), /同意净化准备方案/);
+  assert.match(questionErrorMessage('Partial or conditional legacy replies require explicit action binding.'), /修改任务范围/);
+  assert.match(questionErrorMessage('Question binding does not match.'), /问题已更新/);
+});

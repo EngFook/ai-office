@@ -1,18 +1,20 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, realpathSync, statSync } from 'node:fs';
+import { mkdirSync, realpathSync, statSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { randomUUID, randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 
+import { REVIEW_POLICY, MAX_REPAIR_ROUNDS, parseReviewVerdict, reviewScopeFingerprint, reviewCompletionFingerprint, reviewWorkHold, reviewRepairDescription } from './review-policy.mjs';
 import { isHighRisk, PRE_REVIEW_SUFFIX } from './division-policy.mjs';
 import { localQwenTaskError } from './local-qwen-policy.mjs';
-import { resolutionPaused } from './resolution-policy.mjs';
-import { huddleInputHash, huddleFingerprint, huddleRetryHold, HUDDLE_MAX_RETRIES } from './huddle-policy.mjs';
-import { humanRequestFingerprint, humanRequestSpec, humanRequestHold, explicitApproval } from './human-relay-policy.mjs';
 import { blockingKey, meetingScope, meetingBlocked, meetingBarrierAllows, parseMeetingDecisions } from './blocked-meeting-policy.mjs';
 import { watchHoldReason, watchOwners, watchFingerprint, WATCH_RECIPIENTS } from './watch-task-policy.mjs';
-// A deployment candidate must implement this gate before it can safely replace a running board.
+// Versioned atomic deployment gate; ownership is stored only as a hash.
 export const MAINTENANCE_PROTOCOL = 1;
+import { resolutionPaused } from './resolution-policy.mjs';
+import { huddleInputHash, huddleFingerprint, huddleRetryHold, HUDDLE_MAX_RETRIES } from './huddle-policy.mjs';
+import { PREPARE_ACTION, preparationScope, parsePreparationApproval } from './scoped-approval.mjs';
+import { humanRequestFingerprint, humanRequestSpec, humanRequestHold, explicitApproval } from './human-relay-policy.mjs';
 const PROVIDERS = ['any', 'codex', 'claude', 'grok', 'grok-bot', 'gemini', 'local-qwen'];
 // Text assistance and external Grok Bot work do not hold the coding-folder lock.
 // Grok Bot still serializes its own claims within the same project.
@@ -23,16 +25,16 @@ const KINDS = ['task', 'review', 'research', 'resolution'];
 export const RESEARCH_DIR = path.resolve(import.meta.dirname, '..', 'reports', 'research');
 // Cross review: the provider that wrote the code never does its final QA.
 export const REVIEWER_FOR = { claude: 'codex', codex: 'claude' };
-export function reviewTaskFor(task, preReview = null) {
+export function reviewTaskFor(task, preReview = null, reviewerFor = REVIEWER_FOR) {
   if (task?.source === 'qwen-watch') return null;
   const author = task?.assignee?.provider;
-  if (task?.status !== 'done' || (task.kind || 'task') !== 'task' || !REVIEWER_FOR[author] || !task.projectPath) return null;
+  if (task?.status !== 'done' || (task.kind || 'task') !== 'task' || !reviewerFor[author] || !task.projectPath) return null;
   const risk = isHighRisk(task) ? 'high' : 'ordinary';
   const pre = preReview ? `\n\nGemini pre-review (read-only, ${preReview.status}):\n${String(preReview.result || preReview.error || '').slice(0, 4000)}` : '';
   return {
     title: `Review: ${String(task.title || '').slice(0, 220)}`,
     description: `Cross review of task ${task.id}, written by ${author === 'claude' ? 'Claude Code' : 'Codex'}. You are the independent reviewer and did not write this code.\n\n1. Read the branch diff / recent commits for this work (git status, git diff, git log).\n2. Run the project's analyze and test commands.\n3. Do NOT rewrite or extend the feature. Either approve, or write concrete fix notes (file, problem, suggested fix).\n4. Report status "done" with "APPROVED: ..." or "FIX NOTES: ..." in the summary; use "blocked" only if you could not review.\n\nOriginal task description:\n${String(task.description || '').slice(0, 12000)}\n\nAuthor summary:\n${String(task.result || '').slice(0, 4000)}${pre}\nRisk: ${risk}`,
-    projectPath: task.projectPath, provider: REVIEWER_FOR[author], role: 'Tester', priority: author === 'claude' && risk === 'ordinary' ? 'normal' : 'high', kind: 'review', reviewOf: task.id,
+    projectPath: task.projectPath, provider: reviewerFor[author], role: 'Tester', priority: author === 'claude' && risk === 'ordinary' ? 'normal' : 'high', kind: 'review', reviewOf: task.id,
   };
 }
 const ROLES = ['any', 'Facilitator', 'Admin', 'Helper', 'Tester', 'Manager'];
@@ -83,6 +85,7 @@ export function normalizeTaskProject(value, requireExists = false) {
 export function createTaskStore(options = {}) {
   const home = path.resolve(options.home || process.env.AI_OFFICE_HOME || path.join(homedir(), '.ai-office'));
   const dbPath = options.dbPath || path.join(home, 'board.sqlite');
+  const existingDatabase = existsSync(dbPath);
   const now = options.now || Date.now;
   const researchDir = path.resolve(options.researchDir || RESEARCH_DIR);
   const crossReview = options.crossReview !== false;
@@ -101,11 +104,11 @@ export function createTaskStore(options = {}) {
     CREATE TABLE IF NOT EXISTS roles(id TEXT PRIMARY KEY,record TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS instructions(id TEXT PRIMARY KEY,record TEXT NOT NULL,plan_applied INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),record TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS maintenance(id INTEGER PRIMARY KEY CHECK(id=1),owner_hash TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS human_requests(id TEXT PRIMARY KEY,task_id TEXT NOT NULL,state TEXT NOT NULL,record TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS human_replies(message_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,reply_hash TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS human_requests_task ON human_requests(task_id);
     CREATE TABLE IF NOT EXISTS office_huddle(id INTEGER PRIMARY KEY CHECK(id=1),record TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS maintenance(id INTEGER PRIMARY KEY CHECK(id=1),owner_hash TEXT NOT NULL);
     INSERT OR IGNORE INTO settings(id,record) VALUES(1,'{"autoPickup":true}');`);
   const maintenanceRow = () => db.prepare('SELECT owner_hash FROM maintenance WHERE id=1').get();
   const maintenanceStatus = () => ({ protocol: MAINTENANCE_PROTOCOL, active: Boolean(maintenanceRow()) });
@@ -130,7 +133,7 @@ export function createTaskStore(options = {}) {
     return transaction(() => {
       for (const row of db.prepare("SELECT * FROM tasks WHERE status='running' AND lease_until<=?").all(now())) {
         const task = JSON.parse(row.record);
-        writeTask({ ...task, status: 'blocked', error: 'Worker lease expired. Review the project before explicitly retrying this task.', updatedAt: stamp(), version: task.version + 1 }, { claimHash: null, leaseUntil: null });
+        writeTask(reviewInterrupted({ ...task, status: 'blocked', error: 'Worker lease expired. Review the project before explicitly retrying this task.', updatedAt: stamp(), version: task.version + 1 }), { claimHash: null, leaseUntil: null });
       }
     });
   }
@@ -140,13 +143,130 @@ export function createTaskStore(options = {}) {
     if (provider === 'grok') fail('Use a management instruction for Grok management, or grok-bot for externally executed Grok Bot tasks.');
     const localError = provider === 'local-qwen' && localQwenTaskError(input);
     if (localError) fail(localError);
+    const approvalAction = input.approvalAction == null ? null : choice(input.approvalAction, 'approval action', [PREPARE_ACTION]);
+    if (approvalAction && !['any', 'codex', 'claude'].includes(provider)) fail('Scoped preparation requires a coding worker.');
     if (own(input, 'parked') && typeof input.parked !== 'boolean') fail('parked must be true or false.');
     const createdAt = stamp();
     const kind = provider === 'gemini' ? 'research' : choice(input.kind === 'research' ? 'task' : input.kind, 'kind', KINDS, 'task');
     if (provider === 'gemini') mkdirSync(researchDir, { recursive: true });
+    if (approvalAction && kind !== 'task') fail('Scoped preparation requires an ordinary coding task.');
     const reviewOf = kind === 'review' && typeof input.reviewOf === 'string' ? text(input.reviewOf, 'Reviewed task', 200) : null;
-    return { id: meta.id || randomUUID(), kind, reviewOf, title: text(input.title, 'Title', 240, true), description: text(input.description, 'Description', 20000), projectPath: provider === 'gemini' ? researchDir : normalizeTaskProject(input.projectPath), provider, ...(provider === 'local-qwen' ? { supportType: input.supportType } : {}), role: choice(input.role, 'role', ROLES, 'any'), priority: choice(input.priority, 'priority', PRIORITIES, 'normal'), status: 'pending', ...(own(input, 'parked') ? { parked: input.parked } : {}), source: ['grok', 'qwen-watch', 'qwen-huddle'].includes(meta.source) ? meta.source : 'user', managementRequestId: meta.managementRequestId || null, assignee: null, result: '', error: '', createdAt, updatedAt: createdAt, version: 1 };
+    return { id: meta.id || randomUUID(), kind, reviewOf, ...(approvalAction ? { approvalAction } : {}), title: text(input.title, 'Title', 240, true), description: text(input.description, 'Description', 20000), projectPath: provider === 'gemini' ? researchDir : normalizeTaskProject(input.projectPath), provider, ...(provider === 'local-qwen' ? { supportType: input.supportType } : {}), role: choice(input.role, 'role', ROLES, 'any'), priority: choice(input.priority, 'priority', PRIORITIES, 'normal'), status: approvalAction ? 'blocked' : 'pending', ...(own(input, 'parked') ? { parked: input.parked } : {}), source: ['grok', 'qwen-watch', 'qwen-huddle'].includes(meta.source) ? meta.source : 'user', managementRequestId: meta.managementRequestId || null, assignee: null, result: '', error: approvalAction ? 'Approval required: prepare_sanitized_snapshot.' : '', createdAt, updatedAt: createdAt, version: 1 };
   }
+  const maybeTask = id => { const row = id && rowFor(id); return row ? JSON.parse(row.record) : null; };
+  const reviewEditable = task => task && ['done', 'blocked'].includes(task.status) && !resolutionPaused(task) &&
+    !humanRequestHold(task) && task.reviewState !== 'stale' && task.completionSource !== 'manual';
+  function currentRepairRoot(task) {
+    const binding = task.repairBinding, root = maybeTask(task.repairOf);
+    return binding?.policy === REVIEW_POLICY && reviewEditable(root) && root.reviewPolicy === REVIEW_POLICY &&
+      root.reviewRepairTaskId === task.id && reviewCompletionFingerprint(root) === binding.rootFingerprint &&
+      task.provider === binding.author && reviewScopeFingerprint(task) === binding.scopeFingerprint ? root : null;
+  }
+  function currentReviewParents(task) {
+    const binding = task.reviewBinding;
+    if (binding?.policy !== REVIEW_POLICY || reviewScopeFingerprint(task) !== binding.scopeFingerprint) return null;
+    const parent = maybeTask(task.reviewOf), root = maybeTask(binding.rootId);
+    if (!reviewEditable(parent) || !reviewEditable(root) || parent.reviewPolicy !== REVIEW_POLICY || root.reviewPolicy !== REVIEW_POLICY ||
+      parent.reviewTaskId !== task.id || root.reviewTaskId !== task.id ||
+      reviewCompletionFingerprint(parent) !== binding.parentFingerprint || reviewCompletionFingerprint(root) !== binding.rootFingerprint ||
+      parent.assignee?.provider !== binding.author || task.provider !== binding.reviewer || binding.author === binding.reviewer) return null;
+    return { parent, root, binding };
+  }
+  const reviewRelatives = id => db.prepare('SELECT record FROM tasks').all().map(row => JSON.parse(row.record))
+    .filter(child => child.id !== id && (child.repairOf === id || child.reviewOf === id || child.reviewBinding?.rootId === id));
+  function cancelIntermediateReview(task) {
+    if (task.status === 'done' && task.reviewPolicy === REVIEW_POLICY && task.reviewState === 'pending')
+      writeTask({ ...task, reviewState: 'stale', reviewTaskId: null, error: 'The independent review was cancelled; this completed repair has no current approval.', updatedAt: stamp(), version: task.version + 1 });
+  }
+  function stopReviewChildren(task) {
+    for (const child of reviewRelatives(task.id)) {
+      if (['pending', 'blocked'].includes(child.status))
+        writeTask({ ...child, status: 'blocked', paused: true, error: 'Review follow-up cancelled: the user changed the original task.', updatedAt: stamp(), version: child.version + 1 });
+      else cancelIntermediateReview(child);
+    }
+  }
+  function invalidateReviewParent(task) {
+    const root = maybeTask(task.repairOf || task.reviewBinding?.rootId);
+    // Removing historical evidence is not revoking an already applied verdict.
+    if (root?.reviewState === 'approved' || task.status === 'done' && task.reviewApplied === true) return;
+    const parent = maybeTask(task.reviewOf);
+    if (parent && parent.id !== root?.id && parent.reviewTaskId === task.id) cancelIntermediateReview(parent);
+    const linkedReview = maybeTask(root?.reviewTaskId);
+    const activeLink = root && ([root.reviewTaskId, root.reviewRepairTaskId].includes(task.id) || linkedReview?.reviewOf === task.id);
+    if (root?.reviewPolicy === REVIEW_POLICY && root.status !== 'deleted' && !resolutionPaused(root) && !humanRequestHold(root) && activeLink)
+      writeTask({ ...root, status: 'blocked', reviewState: 'stale', reviewTaskId: null, reviewRepairTaskId: null, reviewCancelledTaskId: task.id, error: 'The linked review or repair was changed or stopped by the user. Inspect the updated scope before explicitly requesting the original task again.', updatedAt: stamp(), version: root.version + 1 });
+  }
+  function staleReviewFollowup(task) {
+    invalidateReviewParent(task);
+    return { ...task, status: 'blocked', reviewPolicy: REVIEW_POLICY, reviewState: 'stale',
+      error: 'The review follow-up no longer matches its completed task or authorized scope. Inspect the original task and request it explicitly; this card will not run automatically.' };
+  }
+  const boundScopeChanged = task => (task.repairBinding || task.reviewBinding) &&
+    reviewScopeFingerprint(task) !== (task.repairBinding || task.reviewBinding).scopeFingerprint;
+  const clearReview = { reviewPolicy: undefined, reviewState: undefined, reviewTaskId: undefined, reviewRepairTaskId: undefined,
+    reviewRepairRound: undefined, reviewCancelledTaskId: undefined, reviewFeedback: undefined, reviewCompletedAt: undefined, reviewRepairResult: undefined };
+  function applyReviewResult(finished) {
+    const verdict = finished.status === 'done' ? parseReviewVerdict(finished.result) : null;
+    const observed = { ...finished, reviewVerdict: verdict || (finished.status === 'blocked' ? 'blocked' : 'unconfirmed') };
+    const current = currentReviewParents(finished);
+    if (!current || finished.assignee?.provider !== current.binding.reviewer) return { ...observed, reviewApplied: false };
+    const { parent, root, binding } = current;
+    const feedback = finished.result.slice(0, 6000);
+    let state = verdict || 'blocked', repairId = null, round = binding.round;
+    const description = reviewRepairDescription(root, finished, round + 1);
+    if (crossReview && verdict === 'changes_requested' && round < MAX_REPAIR_ROUNDS && !root.approvalAction && !root.humanReply?.approvalScope && root.humanReply?.kind !== 'approval' && description) {
+      round++;
+      repairId = `${root.id}:repair:${binding.rootFingerprint.slice(0, 12)}:${round}`;
+      if (!rowFor(repairId)) {
+        const repair = normalizeTask({ title: `Repair ${round}: ${root.title}`.slice(0, 240),
+          description, projectPath: root.projectPath,
+          provider: root.assignee.provider, role: root.role, priority: root.priority }, { id: repairId });
+        writeTask({ ...repair, repairOf: root.id, repairRound: round, repairReviewId: finished.id,
+          repairBinding: { policy: REVIEW_POLICY, rootFingerprint: binding.rootFingerprint, author: root.assignee.provider,
+            scopeFingerprint: reviewScopeFingerprint(repair) } });
+      }
+    }
+    const patch = { status: verdict === 'approved' ? 'done' : 'blocked', reviewPolicy: REVIEW_POLICY, reviewState: state,
+      reviewTaskId: finished.id, reviewRepairTaskId: repairId, reviewRepairRound: round, reviewFeedback: feedback,
+      reviewCompletedAt: stamp(), error: verdict === 'approved' ? '' : verdict === 'changes_requested'
+        ? 'Independent review requested changes. Follow the linked repair or inspect the review before an explicit retry.'
+        : 'Independent review is incomplete or has no explicit verdict. Inspect the linked review; acceptance is unconfirmed.' };
+    if (parent.id !== root.id) writeTask({ ...parent, ...patch, ...(repairId ? { status: 'done', reviewState: 'superseded' } : {}), updatedAt: stamp(), version: parent.version + 1 });
+    writeTask({ ...root, ...patch, ...(verdict === 'approved' && parent.id !== root.id ? { reviewRepairResult: { taskId: parent.id, result: parent.result, reviewId: finished.id } } : {}),
+      updatedAt: stamp(), version: root.version + 1 });
+    return { ...observed, reviewApplied: true };
+  }
+  function reviewInterrupted(task) {
+    if (task.reviewBinding) return applyReviewResult(task);
+    const root = task.repairBinding && currentRepairRoot(task);
+    if (root) writeTask({ ...root, reviewState: 'blocked', error: 'The linked repair stopped before confirmed completion. Inspect its blocker before retrying.', updatedAt: stamp(), version: root.version + 1 });
+    return task;
+  }
+  function queueIndependentReview(finished) {
+    if (finished.status !== 'done' || finished.id.endsWith(PRE_REVIEW_SUFFIX)) return finished;
+    const root = finished.repairOf ? currentRepairRoot(finished) : finished;
+    if (!root) return { ...finished, status: 'blocked', reviewPolicy: REVIEW_POLICY, reviewState: 'stale',
+      error: 'Repair completed after its original task or binding changed. Its result is preserved, but cannot update or approve the original task.' };
+    const specification = crossReview ? reviewTaskFor(finished, null, options.reviewerFor) : null;
+    if (!specification) {
+      if (!finished.repairOf) return finished;
+      const error = 'Repair finished, but no independent review could be queued with the current review configuration. Approval remains unconfirmed; inspect the result and configure a reviewer before explicitly continuing.';
+      writeTask({ ...root, status: 'blocked', reviewState: 'blocked', reviewTaskId: null, reviewRepairTaskId: null, error, updatedAt: stamp(), version: root.version + 1 });
+      return { ...finished, reviewPolicy: REVIEW_POLICY, reviewState: 'blocked', reviewTaskId: null, error };
+    }
+    const fingerprint = reviewCompletionFingerprint(finished), rootFingerprint = reviewCompletionFingerprint(root);
+    const firstId = `${finished.id}:review`;
+    const id = rowFor(firstId) ? `${firstId}:${fingerprint.slice(0, 12)}` : firstId;
+    if (!rowFor(id)) {
+      const review = normalizeTask(specification, { id });
+      writeTask({ ...review, reviewBinding: { policy: REVIEW_POLICY, parentFingerprint: fingerprint, rootId: root.id,
+        rootFingerprint, author: finished.assignee.provider, reviewer: review.provider, round: finished.repairRound || 0,
+        scopeFingerprint: reviewScopeFingerprint(review) } });
+    }
+    if (root.id !== finished.id) writeTask({ ...root, reviewState: 'pending', reviewTaskId: id, updatedAt: stamp(), version: root.version + 1 });
+    return { ...finished, reviewPolicy: REVIEW_POLICY, reviewState: 'pending', reviewTaskId: id };
+  }
+
   function roleRecord(input) {
     object(input);
     const name = text(input.name, 'Role name', 160, true);
@@ -197,7 +317,9 @@ export function createTaskStore(options = {}) {
       for (const task of taskMap.values()) {
         let spec = humanRequestSpec(task);
         if (!spec && task.status === 'blocked' && !resolutionPaused(task) && task.humanGate?.state === 'stale') {
-          const previous = requestFor(task.humanGate.requestId), fingerprint = humanRequestFingerprint(task);
+          const previous = requestFor(task.humanGate.requestId);
+          if (previous.approvalScope || task.approvalAction) continue;
+          const fingerprint = humanRequestFingerprint(task);
           const question = `任务「${task.title}」已经更新，旧回复不能用于新版本。请重新回答以下未解决事项：\n${previous.question.slice(0, 2600)}`;
           spec = { kind: previous.kind, requiresUserAction: previous.requiresUserAction, question, fingerprint, questionHash: createHash('sha256').update(JSON.stringify([task.id, fingerprint, previous.kind, question])).digest('hex') };
         }
@@ -217,12 +339,16 @@ export function createTaskStore(options = {}) {
     });
   }
 
-  const watchRetryAvailable = task => !resolutionPaused(task) && !humanRequestHold(task) && !humanRequestSpec(task) && db.prepare('SELECT count(*) AS total FROM watch_retries WHERE task_id=?').get(task.id).total < 2
+  const watchRetryAvailable = task => !reviewWorkHold(task) && !watchHoldReason(task) && !resolutionPaused(task) && !humanRequestHold(task) && !humanRequestSpec(task) && db.prepare('SELECT count(*) AS total FROM watch_retries WHERE task_id=?').get(task.id).total < 2
     && !db.prepare('SELECT task_id FROM watch_retries WHERE task_id=? AND fingerprint=?').get(task.id, watchFingerprint(task));
   const meetingBarrierClear = () => {
     const records = new Map(db.prepare('SELECT record FROM blocked_meetings').all().map(row => JSON.parse(row.record)).map(record => [record.key, record]));
     return db.prepare("SELECT record FROM tasks WHERE status='blocked'").all().map(row => JSON.parse(row.record)).filter(meetingBlocked).every(task => meetingBarrierAllows(task, records.get(blockingKey(task)), watchRetryAvailable(task)));
   };
+  if (options.autoPickup === false) {
+    // Only initialize a new store; existing explicit settings remain untouched.
+    if (!existingDatabase) db.prepare('UPDATE settings SET record=? WHERE id=1').run(JSON.stringify({ autoPickup: false }));
+  }
   recoverExpired();
   return {
     dbPath,
@@ -233,7 +359,7 @@ export function createTaskStore(options = {}) {
       const roles = db.prepare('SELECT record FROM roles ORDER BY id').all().map(row => JSON.parse(row.record));
       const instructions = db.prepare('SELECT record FROM instructions ORDER BY rowid DESC').all().map(row => JSON.parse(row.record));
       const humanRequests = db.prepare('SELECT record FROM human_requests ORDER BY rowid DESC').all().map(row => JSON.parse(row.record));
-      return { tasks: tasks.filter(task => task.status !== 'deleted'), deletedTasks: tasks.filter(task => task.status === 'deleted'), roles, instructions, humanRequests: humanRequests.filter(request => !tasks.some(task => task.id === request.taskId && task.status === 'deleted')), maintenance: maintenanceStatus(), settings: JSON.parse(db.prepare('SELECT record FROM settings WHERE id=1').get().record), updatedAt: stamp() };
+      return { tasks: tasks.filter(task => task.status !== 'deleted'), deletedTasks: tasks.filter(task => task.status === 'deleted'), roles, instructions, maintenance: maintenanceStatus(), humanRequests: humanRequests.filter(request => !tasks.some(task => task.id === request.taskId && task.status === 'deleted')), settings: JSON.parse(db.prepare('SELECT record FROM settings WHERE id=1').get().record), updatedAt: stamp() };
     },
     acquireMaintenance(ownerToken) {
       maintenanceOwner(ownerToken);
@@ -331,26 +457,33 @@ export function createTaskStore(options = {}) {
       });
     },
     answerHumanRequest(id, input = {}) {
-      object(input); syncHumanRequests();
+      object(input);
       return transaction(() => {
         const request = requestFor(id), task = taskFor(request.taskId);
         if (!['grok-bot', 'office-ui'].includes(input.source) || input.replyAuthor !== 'user') fail('The relay must provide an actual user reply, never its own approval.');
         if (input.questionHash !== request.questionHash) fail('Question binding does not match.', 'VERSION_CONFLICT', 409);
         const userMessageId = identity(input.userMessageId, 'User message ID');
         const userAction = input.source === 'office-ui' ? choice(input.userAction, 'user button action', ['provide_info', 'approve', 'deny', 'restored']) : null;
-        const userReply = text(input.userReply, 'User reply', 8000, !userAction || userAction === 'provide_info');
+        const checkedReply = text(input.userReply, 'User reply', 8000, !!request.approvalScope && userAction !== 'deny' || !userAction || userAction === 'provide_info');
+        const userReply = request.approvalScope && typeof input.userReply === 'string' ? input.userReply : checkedReply;
         const decision = choice(input.decision, 'human decision', ['provide_info', 'approve', 'deny']);
         if (request.kind === 'info' && decision === 'approve' || request.kind === 'approval' && decision === 'provide_info') fail('Information and approval are distinct; answer the actual question.');
         if (userAction && (userAction === 'restored' ? 'provide_info' : userAction) !== decision) fail('Button action and decision must match.');
-        if (decision === 'approve' && input.source !== 'office-ui' && !explicitApproval(userReply)) fail('Approval requires an explicit affirmative user reply.');
-        const replyHash = createHash('sha256').update(JSON.stringify([id, request.questionHash, userReply, decision, input.projectPath ?? null, ...(userAction ? [userAction] : [])])).digest('hex');
+        if (own(input, 'projectPath') && (request.kind !== 'info' || decision !== 'provide_info')) fail('A replacement project folder is allowed only for information replies when the original folder is unavailable.');
+        const currentScope = preparationScope(task);
+        if (JSON.stringify(request.approvalScope || null) !== JSON.stringify(currentScope && request.kind === 'approval' ? currentScope : null)) fail('Approval scope binding does not match; legacy requests are not migrated.', 'VERSION_CONFLICT', 409);
+        const authorization = request.approvalScope && decision === 'approve' ? parsePreparationApproval(userReply) : null;
+        if (decision === 'approve' && request.approvalScope && !authorization) fail('Scoped approval requires an explicit affirmative reply naming sanitized snapshot preparation; unrecognized clauses do not grant permission.');
+        if (decision === 'approve' && !request.approvalScope && !(input.source === 'office-ui' && userReply === '') && !explicitApproval(userReply)) fail('Approval requires an explicit affirmative user reply for the exact action; partial or conditional legacy replies require explicit action binding.');
+        if (request.approvalScope && input.source === 'grok-bot' && (!request.delivery || request.delivery.source !== 'grok-bot' || !request.delivery.messageId || !request.delivery.deliveredAt || request.delivery.messageId === userMessageId)) fail('Scoped approval requires distinct delivered message evidence.');
+        const replyHash = createHash('sha256').update(JSON.stringify([id, request.questionHash, userReply, decision, input.projectPath ?? null, ...(userAction ? [userAction] : []), ...(request.approvalScope ? [input.source, input.replyAuthor, request.approvalScope] : [])])).digest('hex');
         const oldReply = db.prepare('SELECT * FROM human_replies WHERE message_id=?').get(userMessageId);
         if (oldReply) {
           if (oldReply.request_id === id && oldReply.reply_hash === replyHash) return { request, task, applied: false, duplicate: true };
           fail('This user message has already answered a different question.', 'CONFLICT', 409);
         }
         if (input.source === 'office-ui' ? !['pending', 'delivered'].includes(request.state) : request.state !== 'delivered' || !request.delivery) fail('Only a delivered, unanswered question can receive a reply.', 'CONFLICT', 409);
-        if (task.status !== 'blocked' || resolutionPaused(task) || humanRequestFingerprint(task) !== request.fingerprint || task.humanGate?.requestId !== id) fail('The task changed after this question. Ask the current question instead.', 'VERSION_CONFLICT', 409);
+        if (task.status !== 'blocked' || resolutionPaused(task) || humanRequestFingerprint(task) !== request.fingerprint || task.humanGate?.requestId !== id) fail('Only a current, unanswered question can receive a reply; the task changed after this question.', 'VERSION_CONFLICT', 409);
         const textOnlyLocal = task.provider === 'local-qwen' && !task.projectPath && !localQwenTaskError(task);
         let existingProject = '';
         try { existingProject = normalizeTaskProject(task.projectPath, true); } catch {}
@@ -365,20 +498,23 @@ export function createTaskStore(options = {}) {
         if (decision !== 'deny' && !resolvedProject && !textOnlyLocal) fail('The project folder is still unavailable. Provide an existing projectPath explicitly quoted in the user reply, or restore the original folder.', 'MISSING_PROJECT', 409);
         const answeredAt = stamp(), state = decision === 'deny' ? 'denied' : 'answered';
         const pathEvidence = own(input, 'projectPath') ? { originalProjectPath: task.projectPath, providedProjectPath: input.projectPath, resolvedProjectPath: resolvedProject } : {};
-        const answer = { source: input.source, replyAuthor: 'user', userMessageId, userReply, decision, ...(userAction ? { userAction } : {}), answeredAt, ...pathEvidence };
-        const resumedTask = { ...task, projectPath: resolvedProject || task.projectPath };
+        const answer = { source: input.source, replyAuthor: 'user', userMessageId, userReply, decision, ...(userAction ? { userAction } : {}), answeredAt, ...pathEvidence, ...(request.approvalScope ? { requestId: id, questionHash: request.questionHash, fingerprint: request.fingerprint, approvalScope: request.approvalScope, delivery: request.delivery, ...(authorization ? { authorization } : {}) } : {}) };
+        const needsPreparationApproval = !!task.approvalAction && request.kind === 'info' && decision === 'provide_info';
+        const resumedTask = { ...task, projectPath: resolvedProject || task.projectPath, ...(needsPreparationApproval ? { humanRevision: (task.humanRevision || 0) + 1 } : {}) };
         db.prepare('INSERT INTO human_replies(message_id,request_id,reply_hash) VALUES(?,?,?)').run(userMessageId, id, replyHash);
         const updatedRequest = writeRequest({ ...request, state, answer, updatedAt: answeredAt });
         const gate = { ...task.humanGate, state };
-        const updated = decision === 'deny'
+        let updated = decision === 'deny'
           ? { ...task, humanGate: gate, resolution: { ...task.resolution, state: 'user_denied', nextAction: '用户已拒绝此请求；保持受阻，等待用户主动修改指示。' } }
-          : { ...resumedTask, status: 'pending', humanGate: gate, humanReply: { requestId: id, kind: request.kind, question: request.question, questionHash: request.questionHash, ...answer },
+          : { ...resumedTask, status: needsPreparationApproval ? 'blocked' : 'pending', humanGate: gate, humanReply: { requestId: id, kind: request.kind, question: request.question, questionHash: request.questionHash, ...answer },
             huddleRetry: { ...task.huddleRetry, active: true, inputHash: huddleInputHash(resumedTask), provider: task.provider,
               previousError: task.error.slice(0, 2000), previousResult: task.result.slice(-6000), lastAt: answeredAt, reason: '用户已回复当前绑定问题，等待重新检查权限、额度和任务范围。' },
             resolution: { ...task.resolution, state: 'awaiting_capacity', nextAction: '用户已回复；重新检查额度、登录及并发位置后继续原任务。', humanRequestId: id } };
+        if (decision === 'deny' && (task.repairBinding || task.reviewBinding)) invalidateReviewParent(task);
+        if (decision !== 'deny' && boundScopeChanged(updated)) updated = staleReviewFollowup(updated);
         if (decision === 'deny') for (const row of db.prepare('SELECT record FROM tasks').all()) {
           const child = JSON.parse(row.record);
-          if ((child.resolutionOf === task.id || child.reviewOf === task.id || child.id === task.resolution?.investigationTaskId) && ['pending', 'blocked'].includes(child.status)) writeTask({ ...child, status: 'blocked', paused: true, updatedAt: answeredAt, version: child.version + 1 });
+          if ((child.resolutionOf === task.id || child.reviewOf === task.id || child.repairOf === task.id || child.reviewBinding?.rootId === task.id || child.id === task.resolution?.investigationTaskId) && ['pending', 'blocked'].includes(child.status)) writeTask({ ...child, status: 'blocked', paused: true, updatedAt: answeredAt, version: child.version + 1 });
         }
         const result = writeTask({ ...updated, updatedAt: answeredAt, version: task.version + 1 }, { claimHash: null, leaseUntil: null, assigneeId: null, projectKey: projectLockKey(updated) });
         return { request: updatedRequest, task: result, applied: true };
@@ -402,14 +538,18 @@ export function createTaskStore(options = {}) {
         const resolution = { ...old, fingerprint, owner: choice(owner, 'resolution owner', [...PROVIDERS, 'local-qwen']),
           state: text(state, 'Resolution state', 80, true), nextAction: text(nextAction, 'Next action', 2000, true),
           checkedAt: stamp(), nextCheckAt: text(nextCheckAt, 'Next check', 100, true) };
-        return writeTask({ ...task, resolution, version: task.version + 1 });
+        // A repeated follow-up is observation metadata, not changed work. Keep
+        // optimistic edit versions stable while advancing the actual check time.
+        const unchanged = old.fingerprint === fingerprint && old.owner === resolution.owner &&
+          old.state === resolution.state && old.nextAction === resolution.nextAction;
+        return writeTask({ ...task, resolution, version: task.version + (unchanged ? 0 : 1) });
       });
     },
     investigateBlockedTask(id, { version, provider, reason }) {
       return transaction(() => {
         const task = taskFor(id);
         if (task.version !== version || task.status !== 'blocked') fail('Task changed during discussion.', 'VERSION_CONFLICT', 409);
-        if (humanRequestHold(task)) fail(humanRequestHold(task), 'CONFLICT', 409);
+        if (humanRequestHold(task) || reviewWorkHold(task)) fail(humanRequestHold(task) || reviewWorkHold(task), 'CONFLICT', 409);
         if (resolutionPaused(task) || task.kind === 'resolution') fail('Cannot investigate a paused card or create recursive investigations.');
         if (JSON.parse(db.prepare('SELECT record FROM settings WHERE id=1').get().record).autoPickup === false) fail('Automatic pickup is paused.', 'CONFLICT', 409);
         if (!['claude', 'codex'].includes(provider)) fail('Investigations require a coding investigator.');
@@ -452,13 +592,14 @@ export function createTaskStore(options = {}) {
         const task = taskFor(id);
         if (task.version !== version || task.status !== 'blocked') fail('Task changed during discussion.', 'VERSION_CONFLICT', 409);
         if (JSON.parse(db.prepare('SELECT record FROM settings WHERE id=1').get().record).autoPickup === false) fail('Automatic pickup is paused.', 'CONFLICT', 409);
-        const hold = humanRequestHold(task) || huddleRetryHold(task);
+        const hold = humanRequestHold(task) || reviewWorkHold(task) || huddleRetryHold(task);
         if (hold) fail(hold, 'CONFLICT', 409);
         const checked = normalizeTask({ ...task, provider });
         // Huddles may reroute coding providers, but never turn research, support,
         // external management or a review into a different kind of task.
         if (provider !== task.provider && !(provider === 'codex' || provider === 'claude') ||
             provider !== task.provider && !['any', 'codex', 'claude'].includes(task.provider)) fail('Invalid huddle reassignment.');
+        if (task.repairOf && provider !== task.provider) fail('Review repair must keep its original author.');
         if (task.kind === 'review' && provider !== task.provider && task.provider !== 'any') fail('Independent review must keep its reviewer.');
         const inputHash = huddleInputHash(task), previous = task.huddleRetry?.inputHash === inputHash ? task.huddleRetry : null;
         const recoveryPlan = task.resolution?.fingerprint === huddleFingerprint(task) && task.resolution?.clearance ? task.resolution.nextAction : '';
@@ -477,7 +618,7 @@ export function createTaskStore(options = {}) {
       const task = taskFor(id);
       if (!Number.isSafeInteger(input.version) || input.version !== task.version) fail('任务已更新，请刷新后重新选择。', 'VERSION_CONFLICT', 409);
       if (task.status === 'running') fail('任务正在执行，结束后才能操作。', 'CONFLICT', 409);
-      const relatives = () => db.prepare('SELECT record FROM tasks').all().map(row => JSON.parse(row.record)).filter(child => child.resolutionOf === id || child.reviewOf === id || child.id === task.resolution?.investigationTaskId);
+      const relatives = () => db.prepare('SELECT record FROM tasks').all().map(row => JSON.parse(row.record)).filter(child => child.resolutionOf === id || child.reviewOf === id || child.repairOf === id || child.reviewBinding?.rootId === id || child.id === task.resolution?.investigationTaskId);
       if (relatives().some(child => child.status === 'running')) fail('关联排查或审查正在执行，结束后再操作。', 'CONFLICT', 409);
       // Bound questions keep their existing approval, cooldown and delivery rules.
       if (['rerequest', 'deny'].includes(action) && task.humanGate && !['answered', 'resolved'].includes(task.humanGate.state)) {
@@ -498,7 +639,7 @@ export function createTaskStore(options = {}) {
           if (current.status !== 'deleted') fail('只能恢复已删除任务。', 'CONFLICT', 409);
           // Restore the record, never silently resume execution or remove a denial.
           const openGate = current.humanGate && !['answered', 'resolved'].includes(current.humanGate.state);
-          patch = { status: current.deletion.status === 'done' ? 'done' : 'blocked', paused: openGate ? current.deletion.paused : true, userStopped: current.userStopped || (openGate ? undefined : { previousPaused: current.deletion.paused, reason: 'restored' }), deletion: undefined };
+          patch = { status: current.deletion.status === 'done' && !(current.reviewPolicy === REVIEW_POLICY && current.reviewState !== 'approved') ? 'done' : 'blocked', paused: openGate ? current.deletion.paused : true, userStopped: current.userStopped || (openGate ? undefined : { previousPaused: current.deletion.paused, reason: 'restored' }), deletion: undefined };
         } else {
           if (!['pending', 'blocked'].includes(current.status)) fail('只有待办或受阻任务可以重新请求或拒绝。', 'CONFLICT', 409);
           if (action === 'deny') patch = { status: 'blocked', paused: true, userStopped: current.userStopped || { previousPaused: resolutionPaused(current), reason: 'denied' } };
@@ -506,14 +647,25 @@ export function createTaskStore(options = {}) {
             const resumable = { ...current, paused: current.userStopped?.previousPaused ?? current.paused };
             if (resolutionPaused(resumable)) fail('此任务已另行暂停，请先处理原暂停原因。', 'CONFLICT', 409);
             if (current.status === 'pending') fail('任务已在待办队列，无需重复请求。', 'CONFLICT', 409);
+            if (current.repairBinding && !currentRepairRoot(current) || current.reviewBinding && !currentReviewParents(current)) fail('This review follow-up is stale; inspect and explicitly request the original task instead.', 'CONFLICT', 409);
             const needsQuestion = !!humanRequestSpec(resumable);
             patch = { status: needsQuestion ? 'blocked' : 'pending', ...(needsQuestion ? { humanGate: undefined, humanRevision: (current.humanRevision || 0) + 1 } : {}), paused: false, userStopped: undefined, ...(current.huddleRetry ? { huddleRetry: { ...current.huddleRetry, active: false } } : {}) };
           }
         }
+        if (['delete', 'deny'].includes(action) && current.reviewPolicy === REVIEW_POLICY && current.reviewState !== 'approved')
+          patch = { ...patch, reviewState: 'stale', reviewTaskId: null, reviewRepairTaskId: null };
         if (['delete', 'deny'].includes(action)) for (const child of relatives()) {
           if (['pending', 'blocked'].includes(child.status)) writeTask({ ...child, status: 'blocked', paused: true, version: child.version + 1, updatedAt: stamp() });
+          else cancelIntermediateReview(child);
         }
-        const result = writeTask({ ...current, ...patch, cardAction: { action, at: stamp(), source: 'office-ui' }, updatedAt: stamp(), version: current.version + 1 }, { claimHash: null, leaseUntil: null });
+        if (action === 'rerequest' && current.reviewPolicy === REVIEW_POLICY) {
+          stopReviewChildren(current);
+          patch = { ...patch, ...clearReview, humanRevision: (current.humanRevision || 0) + 1 };
+        }
+        if (['delete', 'deny'].includes(action) && (current.repairBinding || current.reviewBinding)) invalidateReviewParent(current);
+        let changed = { ...current, ...patch };
+        if (action === 'rerequest' && boundScopeChanged(changed)) changed = staleReviewFollowup(changed);
+        const result = writeTask({ ...changed, cardAction: { action, at: stamp(), source: 'office-ui' }, updatedAt: stamp(), version: current.version + 1 }, { claimHash: null, leaseUntil: null });
         return { task: result, applied: true };
       });
       if (action === 'rerequest' && outcome.task.status === 'blocked') { syncHumanRequests(); outcome.task = taskFor(id); }
@@ -523,19 +675,22 @@ export function createTaskStore(options = {}) {
       object(patch); recoverExpired();
       return transaction(() => {
         const task = taskFor(id);
+        if (reviewRelatives(id).some(child => child.status === 'running')) fail('An associated review or repair is running; wait before editing.', 'CONFLICT', 409);
         if (!['pending', 'blocked'].includes(task.status)) fail('Only pending or blocked tasks can be edited.', 'CONFLICT', 409);
         if (version != null && (!Number.isSafeInteger(version) || version !== task.version)) fail('Task changed. Refresh before editing.', 'VERSION_CONFLICT', 409);
         for (const forbidden of ['id', 'assignee', 'claimToken', 'claimHash', 'source', 'managementRequestId', 'result', 'error']) if (own(patch, forbidden)) fail(`Cannot change ${forbidden}.`);
-        const merged = { ...task, ...Object.fromEntries(['title', 'description', 'projectPath', 'provider', 'role', 'priority', 'supportType', 'parked'].filter(key => own(patch, key)).map(key => [key, patch[key]])) };
+        const merged = { ...task, ...Object.fromEntries(['title', 'description', 'projectPath', 'provider', 'role', 'priority', 'supportType', 'parked', 'approvalAction'].filter(key => own(patch, key)).map(key => [key, patch[key]])) };
         const checked = normalizeTask(merged);
-        const status = own(patch, 'status') ? choice(patch.status, 'task status', ['pending', 'blocked', 'done']) : task.humanGate ? 'blocked' : task.status;
+        const status = checked.approvalAction && checked.approvalAction !== task.approvalAction ? 'blocked' : own(patch, 'status') ? choice(patch.status, 'task status', ['pending', 'blocked', 'done']) : task.humanGate ? 'blocked' : task.status;
         if (status === 'pending' && task.humanGate) fail('Reply to the bound human question before resuming this task.', 'HUMAN_GATE', 409);
         const manual = status === 'done' ? { result: 'Marked done manually by user.', error: '', completionSource: 'manual' } : {};
         if (task.resolution?.investigationTaskId && (status !== 'blocked' || checked.provider !== task.provider || huddleInputHash(checked) !== huddleInputHash(task))) {
           const childRow = rowFor(task.resolution.investigationTaskId), child = childRow && JSON.parse(childRow.record);
           if (child?.status === 'pending') writeTask({ ...child, status: 'blocked', paused: true, error: '排查取消：原任务已由用户更新。', version: child.version + 1 });
         }
-        return writeTask({ ...task, grokTriage: undefined, humanRevision: (task.humanRevision || 0) + 1, ...(task.humanGate ? { humanGate: { ...task.humanGate, state: 'stale' } } : {}), ...(checked.provider !== task.provider || huddleInputHash(checked) !== huddleInputHash(task) ? { resolution: undefined } : {}), ...(task.huddleRetry ? { huddleRetry: { ...task.huddleRetry, active: false } } : {}), title: checked.title, description: checked.description, projectPath: checked.projectPath, provider: checked.provider, supportType: checked.supportType, ...(own(checked, 'parked') ? { parked: checked.parked } : {}), role: checked.role, priority: checked.priority, status, ...manual, updatedAt: stamp(), version: task.version + 1 }, { projectKey: projectLockKey({ ...checked, id: task.id }), claimHash: null, leaseUntil: null });
+        if (task.reviewPolicy === REVIEW_POLICY) stopReviewChildren(task);
+        if (task.repairBinding || task.reviewBinding) invalidateReviewParent(task);
+        return writeTask({ ...task, ...(task.reviewPolicy === REVIEW_POLICY ? clearReview : {}), grokTriage: undefined, humanRevision: (task.humanRevision || 0) + 1, ...(task.humanGate ? { humanGate: { ...task.humanGate, state: 'stale' } } : {}), ...(checked.provider !== task.provider || huddleInputHash(checked) !== huddleInputHash(task) ? { resolution: undefined } : {}), ...(task.huddleRetry ? { huddleRetry: { ...task.huddleRetry, active: false } } : {}), approvalAction: checked.approvalAction, title: checked.title, description: checked.description, projectPath: checked.projectPath, provider: checked.provider, supportType: checked.supportType, ...(own(checked, 'parked') ? { parked: checked.parked } : {}), role: checked.role, priority: checked.priority, status, ...manual, ...(task.repairBinding || task.reviewBinding ? { reviewBinding: undefined, repairBinding: undefined, repairOf: undefined, repairRound: undefined, reviewDetachedFrom: task.repairOf || task.reviewBinding?.rootId } : {}), updatedAt: stamp(), version: task.version + 1 }, { projectKey: projectLockKey({ ...checked, id: task.id }), claimHash: null, leaseUntil: null });
       });
     },
     claimTask(input, { taskId } = {}) {
@@ -545,9 +700,33 @@ export function createTaskStore(options = {}) {
         if (db.prepare("SELECT id FROM tasks WHERE status='running' AND assignee_id=?").get(worker.id)) return null;
         const candidates = taskId ? [taskFor(taskId)] : db.prepare("SELECT record FROM tasks WHERE status='pending'").all().map(row => JSON.parse(row.record)).sort((a, b) => PRIORITIES.indexOf(a.priority) === PRIORITIES.indexOf(b.priority) ? a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id) : ({ high: 0, normal: 1, low: 2 }[a.priority] - { high: 0, normal: 1, low: 2 }[b.priority]));
         for (const task of candidates) {
-          if (resolutionPaused(task) || humanRequestHold(task) || watchHoldReason(task)) continue;
+          if (task.status !== 'pending') continue;
+          if (reviewWorkHold(task) || watchHoldReason(task) || resolutionPaused(task) || humanRequestHold(task)) continue;
+          if (task.repairBinding && !currentRepairRoot(task) || task.reviewBinding && !currentReviewParents(task)) {
+            writeTask({ ...staleReviewFollowup(task), updatedAt: stamp(), version: task.version + 1 }, { claimHash: null, leaseUntil: null });
+            continue;
+          }
+          if (task.repairBinding && worker.provider !== task.repairBinding.author || task.reviewBinding && worker.provider !== task.reviewBinding.reviewer) continue;
+          if (task.approvalAction) {
+            if (!['codex', 'claude'].includes(worker.provider)) continue;
+            // An information reply, old grant or generic UI button cannot execute preparation.
+            const reply = task.humanReply;
+            const row = reply?.requestId && db.prepare('SELECT record FROM human_requests WHERE id=?').get(reply.requestId);
+            const request = row && JSON.parse(row.record);
+            if (!request || request.state !== 'answered' || request.answer?.decision !== 'approve'
+              || task.humanGate?.state !== 'answered' || task.humanGate.requestId !== request.id
+              || request.fingerprint !== humanRequestFingerprint(task)
+              || JSON.stringify(request.approvalScope) !== JSON.stringify(preparationScope(task))
+              || JSON.stringify(reply) !== JSON.stringify({ requestId: request.id, kind: request.kind, question: request.question, questionHash: request.questionHash, ...request.answer })
+              || JSON.stringify(request.answer.authorization?.allowedActions) !== JSON.stringify([PREPARE_ACTION])) continue;
+          }
           if ((worker.provider === 'grok-bot') !== (task.provider === 'grok-bot')) continue;
           if (task.status !== 'pending' || task.provider !== 'any' && !worker.providers.includes(task.provider) || task.role !== 'any' && !worker.roles.includes('any') && !worker.roles.includes(task.role)) continue;
+          if (task.kind === 'review' && task.reviewOf) {
+            const original = rowFor(task.reviewOf), author = original && JSON.parse(original.record).assignee?.provider;
+            const actualProvider = task.provider === 'any' ? worker.provider : task.provider;
+            if (!author || author === actualProvider || author === worker.provider) continue;
+          }
           if (task.kind === 'resolution' && task.resolutionOf) {
             const parentRow = rowFor(task.resolutionOf), parent = parentRow && JSON.parse(parentRow.record);
             if (!parent || parent.status !== 'blocked' || resolutionPaused(parent) || humanRequestHold(parent) || (huddleFingerprint(parent) !== task.resolutionFingerprint || parent.provider !== task.resolutionOriginalProvider)) continue;
@@ -564,6 +743,8 @@ export function createTaskStore(options = {}) {
           const assignee = { id: worker.id, name: worker.name, provider: task.provider === 'any' ? worker.provider : task.provider, role: task.role === 'any' ? worker.roles.find(value => value !== 'any') || 'Helper' : task.role };
           const claimed = { ...task, humanEpisode: (task.humanEpisode || 0) + 1, projectPath: project, status: 'running', assignee, result: '', error: '', updatedAt: stamp(), version: task.version + 1 };
           writeTask(claimed, { projectKey, assigneeId: worker.id, claimHash: tokenHash(claimToken), leaseUntil: now() + leaseMs });
+          const repairRoot = task.repairOf && currentRepairRoot(task);
+          if (repairRoot) writeTask({ ...repairRoot, reviewState: 'repairing', updatedAt: stamp(), version: repairRoot.version + 1 });
           if (task.resolutionOf) {
             const parentRow = rowFor(task.resolutionOf), parent = parentRow && JSON.parse(parentRow.record);
             if (parent?.status === 'blocked' && huddleFingerprint(parent) === task.resolutionFingerprint && parent.provider === task.resolutionOriginalProvider)
@@ -591,7 +772,7 @@ export function createTaskStore(options = {}) {
         if (!row) return false;
         const record = JSON.parse(row.record), task = taskFor(taskId);
         const shared = Object.values(record.resolutions || {}).find(item => item.scope === meetingScope(task) && item.childIds?.length && ['split', 'resumed'].includes(item.status));
-        if (record.status !== 'resolved' || !shared || record.resolutions?.[taskId] || !meetingBlocked(task) || blockingKey(task) !== key || !watchRetryAvailable(task)) return false;
+        if (task.repairOf || task.repairBinding || task.reviewBinding || record.status !== 'resolved' || !shared || record.resolutions?.[taskId] || !meetingBlocked(task) || blockingKey(task) !== key || !watchRetryAvailable(task)) return false;
         db.prepare('INSERT INTO watch_retries(task_id,fingerprint) VALUES(?,?)').run(task.id, watchFingerprint(task));
         record.resolutions = { ...record.resolutions, [taskId]: { status: 'split', taskId, childIds: shared.childIds, version: task.version, scope: meetingScope(task) } };
         db.prepare('UPDATE blocked_meetings SET record=? WHERE key=?').run(JSON.stringify(record), key);
@@ -626,10 +807,11 @@ export function createTaskStore(options = {}) {
           writeTask({ ...task, status: 'pending', updatedAt: stamp(), version: task.version + 1 }, { claimHash: null, leaseUntil: null });
           return save({ status: 'resumed', taskId, childIds: [] });
         }
-        if (plan.action !== 'split') return null;
+        // A meeting cannot turn research, independent review, or read-only diagnosis into implementation.
+        if (plan.action !== 'split' || task.repairOf || task.repairBinding || task.reviewBinding || (task.kind || 'task') !== 'task') return null;
         const group = record.agendaCards.filter(card => card.scope === meetingScope(task)).map(card => ({ card, task: taskFor(card.taskId) }))
           .filter(({ task: member }) => meetingBlocked(member) && blockingKey(member) === key && meetingScope(member) === meetingScope(task));
-        if (group.some(({ card, task: member }) => meetingScope(member) !== card.scope || !meetingBlocked(member) || blockingKey(member) !== key || !watchRetryAvailable(member))) return null;
+        if (group.some(({ card, task: member }) => (member.kind || 'task') !== 'task' || member.repairOf || member.repairBinding || member.reviewBinding || meetingScope(member) !== card.scope || !meetingBlocked(member) || blockingKey(member) !== key || !watchRetryAvailable(member))) return null;
         const scope = group.map(({ task: member }) => `原卡 ${member.id}：\n${member.description}`).join('\n\n');
         const descriptions = plan.subtasks.map(child => `共享阻塞点的会议分工。仅在以下原授权范围内工作，不扩大部署、合并或账户权限。\n\n原卡要求：\n${scope}\n\n本分工：\n${child.description}`);
         if (descriptions.some(description => description.length > 20000)) return save({ status: 'rejected', taskId, childIds: [], reason: '分工继承的授权文本超出长度上限；原卡未变，请人工缩小分工。' });
@@ -652,14 +834,14 @@ export function createTaskStore(options = {}) {
         const record = JSON.parse(row.record), resolution = record.resolutions?.[taskId];
         if (resolution?.status !== 'split' || !resolution.childIds?.length) return false;
         const task = taskFor(taskId), settings = JSON.parse(db.prepare('SELECT record FROM settings WHERE id=1').get().record);
-        if (settings.autoPickup === false || resolutionPaused(task) || humanRequestHold(task) || humanRequestSpec(task) || !meetingBarrierClear() || meetingScope(task) !== resolution.scope || !meetingBlocked(task) || blockingKey(task) !== key) return false;
+        if (settings.autoPickup === false || task.repairOf || task.repairBinding || task.reviewBinding || resolutionPaused(task) || humanRequestHold(task) || humanRequestSpec(task) || !meetingBarrierClear() || meetingScope(task) !== resolution.scope || !meetingBlocked(task) || blockingKey(task) !== key) return false;
         const children = resolution.childIds.map(id => rowFor(id)).filter(Boolean).map(row => JSON.parse(row.record));
         if (children.length !== resolution.childIds.length) {
           resolution.status = 'needs-human'; resolution.reason = '会议分工卡缺失；请人工核对，不能据此恢复原卡。';
           db.prepare('UPDATE blocked_meetings SET record=? WHERE key=?').run(JSON.stringify(record), key);
           return false;
         }
-        if (children.some(child => child.status !== 'done' || watchHoldReason(child)) || db.prepare("SELECT id FROM tasks WHERE status='running' AND project_key=?").get(projectLockKey(task))) return false;
+        if (children.some(child => child.status !== 'done' || watchHoldReason(child) || resolutionPaused(child) || humanRequestHold(child)) || db.prepare("SELECT id FROM tasks WHERE status='running' AND project_key=?").get(projectLockKey(task))) return false;
         const description = `${task.description}\n\n会议分工已完成，请核对这些原卡的结果后完成原任务：${resolution.childIds.join(', ')}`;
         if (description.length > 20000) return false;
         writeTask({ ...task, status: 'pending', description, updatedAt: stamp(), version: task.version + 1 }, { claimHash: null, leaseUntil: null });
@@ -683,7 +865,7 @@ export function createTaskStore(options = {}) {
         if (maintenanceRow()) return false;
         const task = taskFor(taskId);
         const settings = JSON.parse(db.prepare('SELECT record FROM settings WHERE id=1').get().record);
-        if (settings.autoPickup === false || task.version !== version || resolutionPaused(task) || humanRequestHold(task) || humanRequestSpec(task) || watchHoldReason(task) || !watchOwners(task).includes(provider)) return false;
+        if (settings.autoPickup === false || task.version !== version || reviewWorkHold(task) || watchHoldReason(task) || resolutionPaused(task) || humanRequestHold(task) || humanRequestSpec(task) || !watchOwners(task).includes(provider)) return false;
         if (['run', 'wait'].includes(action)) {
           if (task.status !== 'pending') return false;
           db.prepare('INSERT INTO watch_provider_choices(task_id,provider,version,action) VALUES(?,?,?,?) ON CONFLICT(task_id,provider) DO UPDATE SET version=excluded.version,action=excluded.action').run(task.id, provider, task.version, action);
@@ -700,13 +882,18 @@ export function createTaskStore(options = {}) {
       });
     },
     heartbeat(id, token) { recoverExpired(); return transaction(() => { const row = claimedRow(id, token); db.prepare('UPDATE tasks SET lease_until=? WHERE id=?').run(now() + leaseMs, row.id); return JSON.parse(row.record); }); },
+    // Force-stop a running card that has no live worker in this process (e.g. quota exhausted after a restart).
+    stopRunningTask(id, error) {
+      return transaction(() => { const row = rowFor(id); if (!row || row.status !== 'running') return null; const task = JSON.parse(row.record);
+        return writeTask(reviewInterrupted({ ...task, status: 'blocked', error: text(error, 'Error', 4000), updatedAt: stamp(), version: task.version + 1 }), { claimHash: null, leaseUntil: null }); });
+    },
     finishTask(id, token, input = {}) {
       object(input); recoverExpired();
       const status = choice(input.status, 'completion status', ['done', 'blocked'], 'done');
       const result = text(input.result, 'Result', 50000), error = text(input.error, 'Error', 4000);
       return transaction(() => { const row = claimedRow(id, token), task = JSON.parse(row.record);
         // Gemini does research only. Claude work -> Codex review directly; Codex work -> Claude review.
-        const finished = { ...task, status, result };
+        let finished = { ...task, grokTriage: undefined, status, result, error, ...(status === 'done' ? { completionSource: 'agent' } : {}), updatedAt: stamp(), version: task.version + 1 };
         if (task.resolutionOf) {
           const parentRow = rowFor(task.resolutionOf), parent = parentRow && JSON.parse(parentRow.record);
           if (parent?.status === 'blocked' && huddleFingerprint(parent) === task.resolutionFingerprint && parent.provider === task.resolutionOriginalProvider) {
@@ -717,15 +904,29 @@ export function createTaskStore(options = {}) {
               finding: result.slice(0, 8000), nextAction, clearance, checkedAt: stamp() }, version: parent.version + 1 });
           }
         }
-        const review = crossReview && status === 'done' && !task.id.endsWith(PRE_REVIEW_SUFFIX) ? reviewTaskFor(finished) : null;
-        if (review && !rowFor(`${task.id}:review`)) writeTask(normalizeTask(review, { id: `${task.id}:review` }));
-        return writeTask({ ...task, grokTriage: undefined, status, result, error, ...(status === 'done' ? { completionSource: 'agent' } : {}), updatedAt: stamp(), version: task.version + 1 }, { claimHash: null, leaseUntil: null }); });
+        if (task.kind === 'review') finished = applyReviewResult(finished);
+        else finished = queueIndependentReview(finished);
+        if (task.repairOf && status === 'blocked') {
+          const root = currentRepairRoot(task);
+          if (root) writeTask({ ...root, reviewState: 'blocked', error: 'The linked repair is blocked. Resolve its actual blocker before continuing independent review.', updatedAt: stamp(), version: root.version + 1 });
+        }
+        return writeTask(finished, { claimHash: null, leaseUntil: null }); });
     },
     upsertRole(input) { const role = roleRecord(input); return transaction(() => saveRole(role)); },
     createInstruction(input) {
       object(input); const createdAt = stamp();
-      const instruction = { id: randomUUID(), text: text(input.text, 'Management instruction', 20000, true), projectPath: normalizeTaskProject(input.projectPath), status: 'pending', summary: '', error: '', createdAt, updatedAt: createdAt };
-      return transaction(() => { db.prepare('INSERT INTO instructions(id,record) VALUES(?,?)').run(instruction.id, JSON.stringify(instruction)); return instruction; });
+      if (input.requestId !== undefined && (typeof input.requestId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(input.requestId))) fail('Invalid instruction request ID.');
+      const requestId = input.requestId?.toLowerCase();
+      const instruction = { id: requestId || randomUUID(), ...(requestId ? { requestId } : {}), text: text(input.text, 'Management instruction', 20000, true), projectPath: normalizeTaskProject(input.projectPath), status: 'pending', summary: '', error: '', createdAt, updatedAt: createdAt };
+      return transaction(() => {
+        const row = db.prepare('SELECT record FROM instructions WHERE id=?').get(instruction.id);
+        if (row) {
+          const existing = JSON.parse(row.record);
+          if (existing.requestId !== requestId || existing.text !== instruction.text || existing.projectPath !== instruction.projectPath) fail('This request ID belongs to a different instruction.', 'CONFLICT', 409);
+          return existing;
+        }
+        db.prepare('INSERT INTO instructions(id,record) VALUES(?,?)').run(instruction.id, JSON.stringify(instruction)); return instruction;
+      });
     },
     updateInstruction(id, patch) {
       object(patch);

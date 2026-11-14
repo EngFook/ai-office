@@ -1,3 +1,5 @@
+import { agentExecutionDisplay, officeRuntimeWorkers } from './claude-execution.js';
+
 export const CLAUDE_DEPARTMENTS = ['Engines', 'Game Systems', 'Design & Production', 'Claude Runtime'];
 
 const ENGINE_CATEGORIES = new Set(['godot', 'unity', 'unreal', 'ebitengine', 'web-engines', 'other-engines']);
@@ -6,12 +8,17 @@ export const skillTitle = skill => skill.category === 'router' ? 'Game Developme
 const departmentIndex = skill => ENGINE_CATEGORIES.has(skill.category) ? 0 : skill.category === 'disciplines' ? 1 : 2;
 const statusRank = {working:3, waiting:2, idle:1, offline:0};
 
-export function claudeAgentStatus(agent) {
-  return {working:{id:'running',label:'Running'},idle:{id:'idle',label:'Idle'},waiting:{id:'waiting',label:'Waiting'},offline:{id:'offline',label:'Offline'}}[agent?.liveStatus] || {id:'offline',label:'Offline'};
+export function claudeAgentStatus(agent, lang = 'en') {
+  const zh = lang === 'zh';
+  const worker = officeRuntimeWorkers(agent ? [agent] : [])[0];
+  const state = worker ? agentExecutionDisplay(worker) : agent?.liveStatus;
+  if (state === 'waiting' && worker?.lastEvent === 'StopFailure') return { id: 'waiting', label: zh ? '执行中断' : 'Execution interrupted' };
+  if (['unconfirmed', 'recorded-running'].includes(state)) return { id: 'unconfirmed', label: state === 'recorded-running' ? (zh ? '活动记录 · 待确认' : 'Recorded activity · unconfirmed') : (zh ? '状态待确认' : 'Status unconfirmed') };
+  return { working: { id: 'running', label: zh ? '运行中' : 'Running' }, running: { id: 'running', label: zh ? '运行中' : 'Running' }, idle: { id: 'idle', label: zh ? '空闲' : 'Idle' }, waiting: { id: 'waiting', label: zh ? '等待' : 'Waiting' }, offline: { id: 'offline', label: zh ? '离线' : 'Offline' } }[state] || { id: 'unconfirmed', label: zh ? '状态待确认' : 'Status unconfirmed' };
 }
 
 export function claudeWorkerGroups(roster) {
-  const groups = {running:[],idle:[],waiting:[],offline:[]};
+  const groups = {running:[],idle:[],waiting:[],offline:[],unconfirmed:[]};
   for (const agent of roster) {
     if (agent.runtimeAgents?.length) groups[claudeAgentStatus(agent).id].push(agent);
   }
@@ -28,7 +35,7 @@ export function claudeWorkerIdentity(worker) {
 }
 
 export function runningClaudeAgents(roster) {
-  return roster.filter(agent=>agent.runtimeAgents?.length && agent.liveStatus==='working')
+  return roster.filter(agent=>agent.runtimeAgents?.length && claudeAgentStatus(agent).id==='running')
     .sort((a,b)=>(statusRank[b.liveStatus] || 0)-(statusRank[a.liveStatus] || 0) || a.index-b.index);
 }
 

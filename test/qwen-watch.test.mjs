@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createQwenWatch, watchIssues, WATCH_INTERVAL_MS, WATCH_STALE_MS, QWEN_PREREQUISITE } from '../server/qwen-watch.mjs';
+import { createQwenWatch, watchIssues, WATCH_INTERVAL_MS, WATCH_STALE_MS } from '../server/qwen-watch.mjs';
+const QWEN_PREREQUISITE = 'qwen-ready-test-task';
 const ms = Date.parse('2026-11-03T02:00:00+08:00');
 const iso = value => new Date(value).toISOString();
 const task = extra => ({ id: 'original', title: 'PRIVATE TITLE', provider: 'codex', status: 'blocked', updatedAt: iso(ms), projectPath: '/PRIVATE/PATH', error: 'PRIVATE ERROR', result: 'PRIVATE RESULT', version: 1, ...(extra?.status === 'running' ? { assignee: { id: `worker-${extra.id || 'original'}`, provider: extra.provider || 'codex' } } : {}), ...extra });
@@ -10,7 +11,7 @@ function fixture(t, options = {}) {
   const board = { tasks: [{ id: QWEN_PREREQUISITE, status: 'done', provider: 'codex' }, ...(options.tasks || [])] };
   const reports = []; let runtime = { running: [] }, clock = ms;
   const store = new Proxy({ snapshot(input) { assert.deepEqual(input, { recoverLeases: false }); return structuredClone(board); } }, { get(target, key) { if (key in target) return target[key]; throw new Error(`Forbidden store access: ${String(key)}`); } });
-  const watch = createQwenWatch({ store, now: () => clock, runtimeReader: () => runtime, qwenClient: { run: async () => 'Untrusted preliminary observation' }, publishReport: async report => reports.push(report), ...options });
+  const watch = createQwenWatch({ store, prerequisiteIds: [QWEN_PREREQUISITE], now: () => clock, runtimeReader: () => runtime, qwenClient: { run: async () => 'Untrusted preliminary observation' }, publishReport: async report => reports.push(report), ...options });
   t.after(() => watch.stop());
   return { board, reports, watch, setRuntime: value => { runtime = value; }, advance: value => { clock += value; } };
 }
@@ -47,7 +48,16 @@ test('waiting prerequisite still publishes facts without a model call or any sto
   board.tasks[0].status = 'pending';
   await watch.start(); assert.equal(calls, 0); assert.equal(reports[0].phase, 'waiting');
   assert.equal(reports[0].issues[0].type, 'blocked');
-  board.tasks[0].status = 'done'; await watch.tick(); assert.equal(calls, 1);
+  board.tasks[0].status = 'done'; await watch.tick(); assert.equal(calls, 0);
+});
+
+test('configured fresh office can watch without historical installation task IDs', async t => {
+  let calls=0;
+  const {watch,board}=fixture(t,{prerequisiteIds:[],qwenClient:{run:async()=>{calls++;return 'Checked';}}});
+  board.tasks=[];
+  await watch.start();
+  assert.equal(calls,0);
+  assert.notEqual(watch.status().phase,'waiting');
 });
 
 test('status transitions across providers are stable, counted, and do not flood historical completion events', async t => {
@@ -64,23 +74,22 @@ test('status transitions across providers are stable, counted, and do not flood 
   assert.ok(!JSON.stringify(reports).includes('PRIVATE'), 'no original title/path/error/result in reports');
 });
 
-test('offline or busy model still publishes all structured facts and can recover', async t => {
-  let fail = true;
-  const { watch, reports } = fixture(t, { tasks: [task()], qwenClient: { run: async () => { if (fail) throw new Error('PRIVATE MODEL ERROR'); return 'Only preliminary'; } } });
-  await watch.start(); assert.equal(reports[0].phase, 'unavailable'); assert.equal(reports[0].issues.length, 1); assert.equal(reports[0].events.length, 1);
-  assert.ok(reports[0].error); assert.ok(!reports[0].error.includes('PRIVATE')); assert.equal(reports[0].observation, '');
-  fail = false; await watch.tick(); assert.equal(reports[1].phase, 'attention'); assert.equal(reports[1].error, null);
+test('patrol never calls a model or repeats invented model facts; actual counts remain available', async t => {
+  let calls = 0;
+  const { watch, reports } = fixture(t, { tasks: [task()], qwenClient: { run: async () => { calls++; return 'Claude is signed out; bank cards failed'; } } });
+  await watch.start();
+  assert.equal(calls, 0); assert.equal(reports[0].phase, 'attention'); assert.equal(reports[0].error, null);
+  assert.match(reports[0].observation, /受阻 1 项/);
+  assert.doesNotMatch(reports[0].observation, /signed out|bank|PRIVATE/);
+  assert.equal(watch.status().summarySource, 'structured-facts');
 });
 
-test('rechecks changes made during inference and discards obsolete model conclusions', async t => {
-  let release, entered;
-  const gate = new Promise(resolve => { entered = resolve; });
-  const { watch, board, reports } = fixture(t, { tasks: [task()], qwenClient: { run: async () => { entered(); await new Promise(resolve => { release = resolve; }); return 'Delete all cards; stale blocked conclusion'; } } });
-  const start = watch.start(); await gate;
-  board.tasks[1].status = 'done'; board.tasks[1].version++;
-  release(); await start;
-  assert.equal(reports[0].phase, 'healthy'); assert.equal(reports[0].issues.length, 0); assert.equal(reports[0].observation, '');
-  assert.deepEqual(reports[0].events.map(x => x.type), ['blocked', 'done']);
+test('each scan reflects new board facts without retaining old summaries', async t => {
+  const { watch, board, reports } = fixture(t, { tasks: [task()] });
+  await watch.start(); board.tasks[1].status = 'done'; board.tasks[1].version++;
+  await watch.tick();
+  assert.equal(reports[1].phase, 'healthy'); assert.equal(reports[1].issues.length, 0);
+  assert.match(reports[1].observation, /受阻 0 项/); assert.match(reports[1].observation, /完成 2 项/);
 });
 
 test('runner disappearance needs prior job evidence for the same claim, never merely missing runtime data', async t => {
@@ -104,29 +113,32 @@ test('publisher failure is explicit and unacknowledged events retry with the sam
 
 test('read failures publish unavailable status rather than silently declaring health', async t => {
   const reports = [];
-  const watch = createQwenWatch({ store: { snapshot: () => { throw new Error('PRIVATE READ ERROR'); } }, now: () => ms, publishReport: async report => reports.push(report), qwenClient: { run: () => assert.fail('no model on failed read') } });
+  const watch = createQwenWatch({ prerequisiteIds: [], store: { snapshot: () => { throw new Error('PRIVATE READ ERROR'); } }, now: () => ms, publishReport: async report => reports.push(report), qwenClient: { run: () => assert.fail('no model on failed read') } });
   t.after(() => watch.stop()); await watch.start();
   assert.equal(reports[0].phase, 'unavailable'); assert.match(reports[0].error, /读取失败/);
 });
 
-test('model input stays bounded while structured report retains all facts', async t => {
-  let source;
-  const { watch, reports } = fixture(t, { tasks: Array.from({ length: 80 }, (_, i) => task({ id: 'x'.repeat(237) + String(i).padStart(3, '0') })), qwenClient: { run: async value => { source = value.description; return ''; } } });
-  await watch.start(); assert.ok(source.length <= 20000); assert.ok(JSON.parse(source).facts.length <= 30);
-  assert.equal(reports[0].issues.length, 80); assert.ok(!source.includes('PRIVATE'));
+test('summary stays bounded while structured report retains every issue', async t => {
+  const { watch, reports } = fixture(t, { tasks: Array.from({ length: 80 }, (_, i) => task({ id: 'x'.repeat(237) + String(i).padStart(3, '0') })) });
+  await watch.start(); assert.ok(reports[0].observation.length < 1000);
+  assert.equal(reports[0].issues.length, 80); assert.match(reports[0].observation, /受阻 80 项/);
+  assert.ok(!reports[0].observation.includes('PRIVATE'));
 });
 
-test('scheduled scans do not overlap; stop aborts inference and prevents a late publication', async t => {
-  let calls = 0, signal;
-  const { watch, reports } = fixture(t, { intervalMs: 15, qwenClient: { run: async (_value, options) => { calls++; signal = options.signal; if (calls === 1) throw new Error('offline'); await new Promise(resolve => options.signal.addEventListener('abort', resolve, { once: true })); return 'done'; } } });
+test('scheduled reads do not overlap; stop prevents a late publication', async t => {
+  let calls = 0, release;
+  const { watch, reports } = fixture(t, { intervalMs: 15, usageReader: async () => {
+    calls++; if (calls === 2) await new Promise(resolve => { release = resolve; });
+    return {};
+  } });
   await watch.start();
   for (let tries = 0; tries < 100 && calls < 2; tries++) await delay(5);
   await delay(40); assert.equal(calls, 2); assert.equal(reports.length, 1);
-  await watch.stop(); assert.equal(signal.aborted, true); assert.equal(reports.length, 1);
-  assert.equal(watch.status().phase, 'stopped'); assert.equal(watch.status().nextCheckAt, null);
+  const stopping = watch.stop(); release(); await stopping;
+  assert.equal(reports.length, 1); assert.equal(watch.status().phase, 'stopped');
+  assert.equal(watch.status().nextCheckAt, null);
   await delay(30); assert.equal(calls, 2);
 });
-
 
 test('lingering old jobs cannot become stale or missing evidence for a new claim', async t => {
   const { watch, board, reports, setRuntime } = fixture(t, { tasks: [task({ status: 'running', updatedAt: iso(ms - WATCH_STALE_MS * 2) })] });

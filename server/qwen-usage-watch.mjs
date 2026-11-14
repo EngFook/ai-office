@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { quotaResetAt } from '../src/usage-utils.js';
+import { quotaResetAt, quotaFresh, validQuotaUsed } from '../src/usage-utils.js';
 
 export const USAGE_RISE_PERCENT = 10;
 export const USAGE_RISE_TOKENS = 10000;
@@ -9,7 +9,10 @@ const hash = value => createHash('sha256').update(JSON.stringify(value)).digest(
 const number = (value, max = Number.MAX_SAFE_INTEGER) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= max ? value : null;
 const time = value => number(value, 8640000000000000);
 const kind = name => /week/i.test(name) ? 'weekly' : /5.hour|session/i.test(name) ? 'session' : /daily/i.test(name) ? 'daily' : 'other';
-const day = at => new Date(at + 8 * 3600000).toISOString().slice(0, 10);
+const day = (at, timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC') => {
+  try { return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(at)); }
+  catch { return null; }
+};
 const comparable = (at, before, now) => time(at) !== null && time(before) !== null && at > before && at - before <= USAGE_COMPARE_MS && at <= now + 60000;
 const finiteSum = items => items.length && items.every(value => number(value) !== null) ? number(items.reduce((a, b) => a + b, 0)) : null;
 
@@ -38,6 +41,10 @@ export function sanitizeUsage(value) {
 
 export function observeUsage(data, previous = {}, now = Date.now()) {
   const usage = {}, events = [], issues = [];
+  // Configured offices explicitly name enabled providers. Legacy snapshots omit
+  // this field; malformed scope must not silently hide their quota warnings.
+  const scoped = Array.isArray(data?.enabledProviders) && data.enabledProviders.every(id => typeof id === 'string');
+  const enabled = scoped ? new Set(data.enabledProviders.filter(id => Object.hasOwn(names, id))) : null;
   const generated = time(data?.generatedAt);
   const sourceFresh = generated !== null && generated <= now + 60000 && now - generated <= USAGE_COMPARE_MS;
   function emit(provider, type, fact, identity, severity = 'info', active = false) {
@@ -46,10 +53,11 @@ export function observeUsage(data, previous = {}, now = Date.now()) {
     if (active) issues.push(item);
   }
   for (const [provider, displayName] of Object.entries(names)) {
+    if (enabled && !enabled.has(provider)) continue;
     const raw = data?.providers?.find(item => item.provider === displayName);
     const old = previous[provider] || {};
     const quota = data?.quota?.[provider], observed = time(quota?.observedAt);
-    const fresh = sourceFresh && !data?.quota?.[`${provider}Error`] && observed !== null && observed <= now + 60000 && now - observed <= (provider === 'grok' ? 6 * 3600000 : USAGE_COMPARE_MS);
+    const fresh = sourceFresh && !data?.quota?.[`${provider}Error`] && observed !== null && quotaFresh(quota, displayName, now);
     const tokens = !sourceFresh || raw?.usageError || raw?.error ? null : provider === 'local-qwen' ? number(raw?.todayTokens) : finiteSum((raw?.models || []).map(model => model.today?.total));
     const entry = usage[provider] = { observedAt: generated, quotaState: provider === 'local-qwen' ? 'no-quota' : fresh ? quota?.windows?.length ? 'available' : 'unknown' : 'unavailable', todayTokens: tokens, tokensAvailable: tokens !== null, online: typeof raw?.online === 'boolean' ? raw.online : null, averageTokPerSecond: number(raw?.averageTokPerSecond), windows: [] };
     if (provider !== 'local-qwen' && entry.quotaState !== 'available') {
@@ -64,7 +72,8 @@ export function observeUsage(data, previous = {}, now = Date.now()) {
     if (tokens !== null) {
       const baseAt = time(old.baselineAt) ?? old.observedAt;
       const baseTokens = number(old.baselineTokens) ?? old.todayTokens;
-      const compatible = old.tokensAvailable && number(baseTokens) !== null && comparable(generated, baseAt, now) && day(generated) === day(baseAt) && tokens >= baseTokens;
+      const currentDay = day(generated, raw?.timeZone);
+      const compatible = old.tokensAvailable && number(baseTokens) !== null && comparable(generated, baseAt, now) && currentDay !== null && currentDay === day(baseAt, raw?.timeZone) && tokens >= baseTokens;
       entry.baselineAt = compatible ? baseAt : generated;
       entry.baselineTokens = compatible ? baseTokens : tokens;
       if (compatible && tokens - baseTokens >= USAGE_RISE_TOKENS && tokens - baseTokens >= baseTokens * .25) {
@@ -78,6 +87,7 @@ export function observeUsage(data, previous = {}, now = Date.now()) {
     // arbitrary names. Duplicate names get an occurrence index.
     const occurrences = new Map();
     for (const rawWindow of fresh ? quota?.windows || [] : []) {
+      if (!validQuotaUsed(rawWindow)) continue;
       const name = String(rawWindow.name || rawWindow.windowMinutes || 'quota');
       const index = occurrences.get(name) || 0; occurrences.set(name, index + 1);
       const windowId = hash([name, index]), before = old.windows?.find(item => item.windowId === windowId);
@@ -85,7 +95,7 @@ export function observeUsage(data, previous = {}, now = Date.now()) {
       if (used === null) continue;
       const remaining = left ?? 100 - used;
       const reset = quotaResetAt(rawWindow, observed), resetsAt = time(reset);
-      const resetEstimated = /^(?:in\s+)?(?:\d+\s*(?:d|days?|h|hours?|m|minutes?)\s*)+$/i.test(String(rawWindow.resetsText || '').replace(/\(Asia\/Singapore\)|SGT/gi, '').trim());
+      const resetEstimated = /^(?:in\s+)?(?:\d+\s*(?:d|days?|h|hours?|m|minutes?)\s*)+$/i.test(String(rawWindow.resetsText || '').replace(/\((?:[A-Za-z_+-]+\/)+[A-Za-z_+-]+\)|\b(?:SGT|UTC|GMT)\b/gi, '').trim());
       const window = { resetEstimated, windowId, windowKind: kind(name), usedPercent: used, remainingPercent: remaining, observedAt: observed, resetsAt, resetDue: resetsAt !== null && resetsAt <= now };
       entry.windows.push(window);
       const sameCycle = !before || before.resetEstimated && resetEstimated || time(before.resetsAt) === resetsAt || (time(before.resetsAt) !== null && resetsAt !== null && Math.abs(before.resetsAt - resetsAt) <= 60000);

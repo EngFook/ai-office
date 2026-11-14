@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { GROK_COMMUNICATION_POLICY } from '../server/communication-policy.mjs';
 import { taskPrompt } from '../server/task-runner.mjs';
 import { createLocalQwen } from '../server/local-qwen.mjs';
 import { createGrokWake } from '../server/grok-wake.mjs';
@@ -84,4 +85,14 @@ test('webhook instructs bot identity and queue lookup; failure leaves delivery u
   assert.match(body.message, /not approval/);
   assert.equal(question.state, 'pending');
   assert.ok(wake.status().error);
+});
+
+
+test('the explicit 08:00 report authorization retains the prohibition on private chat and requires a real receipt', () => {
+  assertPolicy(GROK_COMMUNICATION_POLICY);
+  assert.match(GROK_COMMUNICATION_POLICY, /daily work report at the configured hour and time zone/);
+  assert.match(GROK_COMMUNICATION_POLICY, /office daily-reports queue through that same configured webhook/);
+  assert.match(GROK_COMMUNICATION_POLICY, /current reportHash and the real delivered messageId only after actual full-report delivery/);
+  assert.match(GROK_COMMUNICATION_POLICY, /does not permit private-chat or UI automation/);
+  assert.match(GROK_COMMUNICATION_POLICY, /HTTP 2xx is transport acceptance, never proof of delivery/);
 });

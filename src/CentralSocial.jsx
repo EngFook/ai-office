@@ -40,7 +40,7 @@ export default function CentralSocial({ area, blockedTaskCount = 0, huddle, onTa
         <boxGeometry args={[1.1, .67, .035]}/><meshStandardMaterial color={['#e4b486','#dca79a','#e5c998'][i%3]} roughness={1}/>
       </mesh>)}
       <SceneLabel position={[0, 4.15, 0]} avoidCollisions priority={2} style={{pointerEvents:'auto'}}>
-        <button type="button" className="scene-sign shared-office-sign" data-interactive="true" data-no-i18n aria-label={label} onClick={open}>{label}{huddle?.meeting?.active && <small style={{display:'block',fontSize:10,marginTop:3}}>{lang === 'zh' ? 'Qwen 召集代表 · 查看分配建议' : 'Qwen delegate huddle · view recommendations'}</small>}</button>
+        <button type="button" className="scene-sign shared-office-sign" data-interactive="true" data-no-i18n aria-label={label} onClick={open}>{label}{huddle?.meeting?.active && <small style={{display:'block',fontSize:10,marginTop:3}}>{lang === 'zh' ? '查看受阻原因与下一步' : 'View blockers and next steps'}</small>}</button>
       </SceneLabel>
     </group>
   </group>

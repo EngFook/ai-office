@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
-import { quotaResetAt } from '../src/usage-utils.js';
+import { quotaResetAt, quotaFresh, validQuotaUsed } from '../src/usage-utils.js';
 import { isReviewLike } from './division-policy.mjs';
 import { resolutionPaused, resolutionHumanGate } from './resolution-policy.mjs';
 
 export const HUDDLE_INTERVAL_MS = 5 * 60000;
 export const HUDDLE_MAX_RETRIES = 2;
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-export const huddleInputHash = task => digest([task.title, task.description, task.projectPath, task.kind, task.reviewOf, task.role, task.supportType]);
+export const huddleInputHash = task => digest([task.title, task.description, task.projectPath, task.kind, task.reviewOf, task.role, task.supportType, ...(task.approvalAction == null ? [] : [{ approvalAction: task.approvalAction }])]);
 export const huddleFingerprint = task => digest([huddleInputHash(task), task.error || '', task.result || '']);
 
 // Only the recorded failure is evidence of a transient blocker. A task title,
@@ -33,12 +33,13 @@ export function huddleRetryHold(task) {
 export function huddleQuota(provider, quota, task, now = Date.now()) {
   if (provider === 'local-qwen') return { allowed: true, remainingPercent: null, reason: '本地 Qwen 无订阅额度；仅承接已许可的辅助任务。' };
   const value = quota?.[provider], observed = typeof value?.observedAt === 'number' ? value.observedAt : Date.parse(value?.observedAt);
-  if (quota?.[`${provider}Error`] || !Number.isFinite(observed) || observed > now + 60000 || now - observed > 30 * 60000 || !Array.isArray(value?.windows) || !value.windows.length) return { allowed: false, remainingPercent: null, reason: '额度未知或观测已过期，等待可靠的额度数据。' };
+  const displayName = { claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini', grok: 'Grok' }[provider] || provider;
+  if (quota?.[`${provider}Error`] || !quotaFresh(value, displayName, now) || !Array.isArray(value?.windows) || !value.windows.length) return { allowed: false, remainingPercent: null, reason: '额度未知或观测已过期，等待可靠的额度数据。' };
   const left = [];
   for (const window of value.windows) {
     const remaining = window.remainingPercent;
     const reset = quotaResetAt(window, observed);
-    if (!Number.isFinite(remaining) || remaining < 0 || remaining > 100 || Number.isFinite(reset) && reset <= now) return { allowed: false, remainingPercent: null, reason: '额度窗口数据不完整或等待重置后的新观测。' };
+    if (!validQuotaUsed(window) || !Number.isFinite(remaining) || remaining < 0 || remaining > 100 || Number.isFinite(reset) && reset <= now) return { allowed: false, remainingPercent: null, reason: '额度窗口数据不完整或等待重置后的新观测。' };
     left.push(remaining);
   }
   const remainingPercent = Math.min(...left);

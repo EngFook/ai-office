@@ -16,7 +16,13 @@ export function createGrokBotPresence({now=Date.now, workingLeaseMs=60000, conne
   function status() {
     const current=now();
     const connected=[...bots.values()].filter(bot=>current-bot.lastSeen<connectionLeaseMs);
-    const agents=connected.map(bot=>({id:`grok-bot-${bot.id}`,sessionId:bot.id,name:bot.name,agentType:'grok-bot',agentRole:bot.role,isSubagent:false,observed:true,provider:'Grok',status:bot.status==='working'&&current-bot.lastSeen<workingLeaseMs?'working':'idle',tool:bot.activity||null,updatedAt:new Date(bot.lastSeen).toISOString(),instructionId:bot.instructionId}));
+    const agents=connected.map(bot=>{
+      const fresh=current-bot.lastSeen<workingLeaseMs;
+      const status=bot.status==='working'&&fresh?'working':'idle';
+      return {id:`grok-bot-${bot.id}`,sessionId:bot.id,name:bot.name,agentType:'grok-bot',agentRole:bot.role,isSubagent:false,observed:true,provider:'Grok',status,
+        executionState:bot.status==='working'&&!fresh?'unconfirmed':status,observationSource:'grok-bot-heartbeat',
+        tool:status==='working'?bot.activity||null:null,updatedAt:new Date(bot.lastSeen).toISOString(),instructionId:bot.instructionId};
+    });
     return {connected:connected.length>0,agents,lastSeen:connected.length?new Date(Math.max(...connected.map(bot=>bot.lastSeen))).toISOString():null};
   }
   return {heartbeat,status};

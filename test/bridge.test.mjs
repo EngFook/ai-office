@@ -236,3 +236,74 @@ test('API rejects remote hosts, cross-origin requests and writes, serves local r
   assert.equal((await request({ headers: { host: 'evil.example' } })).status, 403);
   assert.equal((await request({ headers: { host: '127.0.0.1:5173', 'sec-fetch-site': 'cross-site' } })).status, 403);
 });
+
+test('unfinished hooks are last-recorded activity, never proof of live execution or inferred native stalled state', () => {
+  const [pending] = reconstructAgents([event('SubagentStart', 1000, { agentId: 'child' }), event('PreToolUse', 2000, { agentId: 'child', tool: 'Bash', pid: 123 })], [], { isProcessAlive: () => true });
+  assert.equal(pending.status, 'working');
+  assert.equal(pending.executionState, 'unconfirmed');
+  assert.equal(pending.activityPhase, 'tool-pending');
+  assert.equal(pending.lastEventAt, '1970-01-01T00:00:02.000Z');
+  assert.equal(pending.observationSource, 'claude-lifecycle-hooks');
+  const [between] = reconstructAgents([event('PostToolUse', Date.now(), { tool: 'Bash' })]);
+  assert.equal(between.executionState, 'unconfirmed');
+  assert.equal(between.activityPhase, 'between-hooks');
+  assert.equal(reconstructAgents([event('Stop', 3000)])[0].executionState, 'idle');
+  assert.equal(reconstructAgents([event('SessionEnd', 4000)])[0].executionState, 'offline');
+});
+
+test('unreadable lifecycle sources cannot become a confident empty or idle observation', async t => {
+  const home = await mkdtemp(path.join(tmpdir(), 'office-health-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await mkdir(path.join(home, 'sessions'), { recursive: true });
+  await writeFile(path.join(home, 'sessions', '123.json'), JSON.stringify({ sessionId: 'session-1', pid: 123, startedAt: 1000 }));
+  let status = await readClaudeStatus({ claudeHome: home, isProcessAlive: () => true });
+  assert.equal(status.metadataAvailable, false);
+  assert.equal(status.agents[0].executionState, 'unconfirmed');
+  assert.equal(status.agents[0].observationSource, 'claude-session-metadata');
+  assert.equal(status.executionCounts.unconfirmed, 1);
+  assert.ok(status.sourceErrors.length > 0);
+  assert.ok(!JSON.stringify(status.sourceErrors).includes(home));
+  await mkdir(path.join(home, 'ai-office', 'events'), { recursive: true });
+  await writeFile(path.join(home, 'ai-office', 'events', 'broken.json'), '{"partial":');
+  status = await readClaudeStatus({ claudeHome: home, isProcessAlive: () => true });
+  assert.equal(status.metadataAvailable, false);
+  assert.equal(status.sourceHealth.lifecycle.unreadableRecords, 1);
+  await writeFile(path.join(home, 'ai-office', 'events', 'broken.json'), JSON.stringify(event('PreToolUse', 2000, { tool: 'Bash' })));
+  status = await readClaudeStatus({ claudeHome: home, isProcessAlive: () => true });
+  assert.equal(status.metadataAvailable, true);
+  assert.equal(status.executionCounts.unconfirmed, 1);
+  assert.equal(status.executionCounts.working, undefined);
+  assert.equal(status.agents[0].status, 'working');
+  assert.ok(status.observedAt);
+});
+
+test('workspace carries the same execution confidence and source coverage as lifecycle status', async t => {
+  const { createClaudeWorkspaceReader } = await import('../server/claude-workspace.mjs');
+  const home = await mkdtemp(path.join(tmpdir(), 'office-workspace-health-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const metadata = { agents: [], observedAt: '2026-11-09T01:00:00Z', metadataAvailable: false, executionCounts: {}, sourceErrors: ['Unavailable'], coverage: 'Last recorded only' };
+  const data = await createClaudeWorkspaceReader({ claudeHome: home })(metadata);
+  for (const key of ['observedAt', 'metadataAvailable', 'executionCounts', 'sourceErrors', 'coverage']) assert.deepEqual(data[key], metadata[key]);
+});
+
+
+test('explicit compact Claude status preserves agents and source health while default catalog and access checks remain unchanged', async t => {
+  const home = await fixture(t);
+  await writeFile(path.join(home, 'ai-office/events/current.json'), JSON.stringify(event('UserPromptSubmit', Date.now(), { pid: 123, cwd: '/tmp/project' })));
+  let middleware; const plugin = claudeBridge({ claudeHome: home, isProcessAlive: () => true, now: Date.now() });
+  t.after(() => plugin.closeBundle());
+  plugin.configureServer({ middlewares: { use: handler => { middleware = handler; } } });
+  async function request(url = '/api/claude/status', extra = {}) {
+    let body; const response = { statusCode: 200, setHeader() {}, end(value) { body = value; } };
+    await middleware({ url, method: 'GET', socket: { remoteAddress: '127.0.0.1' }, headers: { host: '127.0.0.1:5186' }, ...extra }, response, () => assert.fail('Expected API handler'));
+    return { status: response.statusCode, body: JSON.parse(body) };
+  }
+  const full = (await request()).body, compact = (await request('/api/claude/status?view=agents')).body;
+  assert.equal(full.skills.length, 2); assert.equal(full.agents.length, 1);
+  assert.equal(compact.skills, undefined); assert.equal(compact.topicSkillCount, undefined);
+  for (const key of ['agents', 'observedAt', 'connected', 'metadataAvailable', 'executionCounts', 'sourceHealth', 'sourceErrors', 'coverage']) assert.deepEqual(compact[key], full[key], key);
+  assert.equal((await request('/api/claude/status?view=unknown')).body.skills.length, 2);
+  assert.equal((await request('/api/claude/status?view=agents', { method: 'POST' })).status, 405);
+  assert.equal((await request('/api/claude/status?view=agents', { socket: { remoteAddress: '192.168.1.10' } })).status, 403);
+  assert.equal((await request('/api/claude/status?view=agents', { headers: { host: '127.0.0.1:5186', origin: 'https://unrelated.invalid' } })).status, 403);
+});

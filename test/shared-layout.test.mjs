@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildSharedRoster, resolveSharedSelection, workingOfficeAgents } from '../src/unified-office.js';
-import { createSharedLayout, REVIEWER_ROLES, sharedFocusArea, sharedSeatForAgent, WORKSTATION_GEOMETRY, WORKSTATION_GRID } from '../src/shared-layout.js';
+import { createSharedLayout, GROK_UNBLOCKING_ROLES, grokUnblockingRole, sharedFocusArea, sharedSeatForAgent, WORKSTATION_GEOMETRY, WORKSTATION_GRID } from '../src/shared-layout.js';
 
-const runtime = (id, status = 'working') => ({ id, status, isSubagent: true, observed: true, name: id });
+const runtime = (id, status = 'working') => ({ id, status, executionState: status, isSubagent: true, observed: true, name: id });
 const state = (provider, count) => ({ connected: true, agents: Array.from({ length: count }, (_, index) => runtime(`${provider}-${String(index).padStart(3, '0')}`)) });
 const position = seat => [seat.zone, seat.slot, seat.x, seat.z, seat.chairX, seat.chairZ, seat.angle];
 const epsilon = 1e-8;
-const expectedRoles = ['Playtester', 'UX/UI Reviewer', 'Performance Engineer', 'Code Reviewer'];
-const fixedCounts = { claude: 20, codex: 6, reviewers: 4, grok: 1 };
+const expectedRoles = ['Blocker Triage', 'Recovery Coordination', 'Information Follow-up', 'Recovery Verification'];
+const fixedCounts = { claude: 20, codex: 9, reviewers: 4, grok: 1 };
 const board = () => ({
   roles: expectedRoles.map(name => ({ name, provider: 'grok' })),
   tasks: [
@@ -38,16 +38,17 @@ function assertFixedDesks(layout) {
   assert.equal(layout.desks.find(desk => desk.zone === 'grok').label, 'Grok Dispatch Lead');
 }
 
-test('quiet office has exactly 20 Claude, 6 Codex, four reviewer pods and one manager without invented people', () => {
+test('quiet office has exactly 20 Claude, 9 Codex, four Grok unblocking pods and one manager without invented people', () => {
   const layout = createSharedLayout();
   assertFixedDesks(layout);
-  assert.equal(layout.desks.length, 37);
+  assert.equal(layout.desks.length, 40);
   assert.equal(layout.agents.length, 0);
   assert.equal(layout.placements.size, 0);
-  assert.deepEqual([...REVIEWER_ROLES].sort(), [...expectedRoles].sort());
+  assert.deepEqual([...GROK_UNBLOCKING_ROLES].sort(), [...expectedRoles].sort());
   assert.ok(layout.desks.every(desk => desk.occupant === null));
+  assert.equal(layout.zones.find(zone => zone.id === 'reviewers').department, 'Grok Unblocking');
   for (const zone of layout.zones) assert.equal(zone.workingCount, 0);
-  for (const [id, columns, rows] of [['codex', 3, 2], ['reviewers', 2, 2]]) {
+  for (const [id, columns, rows] of [['codex', 3, 3], ['reviewers', 2, 2]]) {
     const desks = layout.desks.filter(desk => desk.zone === id);
     assert.equal(new Set(desks.map(desk => desk.x)).size, columns);
     assert.equal(new Set(desks.map(desk => desk.z)).size, rows);
@@ -61,28 +62,48 @@ test('board roles, wildcards, duplicates and completed history never inflate the
   data.tasks.push(...Array.from({ length: 100 }, (_, index) => ({ provider: 'claude', role: `Historic role ${index}`, status: 'done' })));
   const layout = createSharedLayout([], new Map(), data);
   assertFixedDesks(layout);
-  assert.equal(layout.desks.length, 37);
+  assert.equal(layout.desks.length, 40);
   assert.equal(layout.agents.length, 0);
   assert.deepEqual(layout.bounds, createSharedLayout().bounds);
   assert.equal(layout.zones.some(zone => zone.id === 'overflow'), false);
 });
 
-test('workers use existing team desks and matching reviewer pods before adding furniture', () => {
+test('unblocking roles require explicit Grok metadata and do not reclassify other providers', () => {
+  for (const role of expectedRoles) {
+    assert.equal(grokUnblockingRole({ provider: 'Grok', role }), role);
+    assert.equal(grokUnblockingRole({ provider: 'grok', role: 'Manager', runtimeAgents: [{ agentRole: `  ${role.toLowerCase()}  ` }] }), role);
+    for (const provider of ['Claude Code', 'Codex', 'Gemini', 'Local Qwen']) {
+      assert.ok(!grokUnblockingRole({ provider, role, runtimeAgents: [{ agentRole: role }] }));
+    }
+  }
+  for (const role of ['Unblocking Coordinator', 'Grok 解阻协调员']) {
+    assert.equal(grokUnblockingRole({ provider: 'Grok', role }), 'Recovery Coordination');
+  }
+  for (const role of ['Manager', 'Code Reviewer', 'Playtester', 'Helper', 'Game Designer']) {
+    assert.ok(!grokUnblockingRole({ provider: 'Grok', role }));
+  }
+});
+
+test('Grok unblocking workers use their dedicated desks while code reviewers stay with their providers', () => {
   const roster = buildSharedRoster({
-    claude: { connected: true, agents: [{ ...runtime('designer'), agentRole: 'Game Designer' }, runtime('builder')] },
-    codex: { connected: true, agents: [{ ...runtime('helper'), agentRole: 'Helper' }, { ...runtime('reviewer'), agentRole: 'Code Reviewer' }, { ...runtime('root'), isSubagent: false }] },
-    grok: { connected: true, agents: [{ ...runtime('playtester'), agentRole: 'Playtester' }, { ...runtime('manager'), agentRole: 'Manager' }] },
+    claude: { connected: true, agents: [{ ...runtime('designer'), agentRole: 'Game Designer' }, runtime('builder'), { ...runtime('claude-triage'), agentRole: 'Blocker Triage' }] },
+    codex: { connected: true, agents: [{ ...runtime('helper'), agentRole: 'Helper' }, { ...runtime('reviewer'), agentRole: 'Code Reviewer' }, { ...runtime('root'), isSubagent: false }, { ...runtime('codex-recovery'), agentRole: 'Recovery Coordination' }] },
+    grok: { connected: true, agents: [...expectedRoles.map((role, index) => ({ ...runtime(`unblock-${index}`), agentRole: role })), { ...runtime('playtester'), agentRole: 'Playtester' }, { ...runtime('manager'), agentRole: 'Manager' }] },
   });
   const layout = createSharedLayout(roster, new Map(), board());
+  const seatFor = id => sharedSeatForAgent(roster.find(agent => agent.runtimeAgents[0].id === id), layout);
   assertFixedDesks(layout);
-  assert.equal(layout.desks.length, 37);
+  assert.equal(layout.desks.length, 41);
   assert.equal(layout.placements.size, roster.length);
-  for (const [id, label] of [['designer', 'UX/UI Reviewer'], ['reviewer', 'Code Reviewer'], ['playtester', 'Playtester']]) {
-    const seat = sharedSeatForAgent(roster.find(agent => agent.runtimeAgents[0].id === id), layout);
+  for (const [index, label] of expectedRoles.entries()) {
+    const seat = seatFor(`unblock-${index}`);
     assert.equal(seat.zone, 'reviewers');
     assert.equal(seat.label, label);
   }
-  assert.equal(sharedSeatForAgent(roster.find(agent => agent.runtimeAgents[0].id === 'manager'), layout).zone, 'grok');
+  for (const id of ['designer', 'builder', 'claude-triage']) assert.equal(seatFor(id).zone, 'claude');
+  for (const id of ['helper', 'reviewer', 'root', 'codex-recovery']) assert.equal(seatFor(id).zone, 'codex');
+  assert.equal(seatFor('playtester').zone, 'overflow');
+  assert.equal(seatFor('manager').zone, 'grok');
   for (const agent of roster) {
     const seat = sharedSeatForAgent(agent, layout);
     assert.equal(seat.occupant.id, agent.id);
@@ -94,19 +115,37 @@ test('workers use existing team desks and matching reviewer pods before adding f
   }
 });
 
-test('simultaneous workers sharing a reviewer role retain separate seats without adding management desks', () => {
-  const roster = buildSharedRoster(Object.fromEntries(['claude', 'codex', 'grok'].map(provider => [provider, {
-    connected: true,
-    agents: [{ ...runtime(`${provider}-reviewer`), agentRole: '  code reviewer  ' }],
-  }])));
-  const layout = createSharedLayout(roster);
+test('simultaneous Grok workers sharing an unblocking role use separate seats without occupying other specialist desks', () => {
+  const states = { grok: { connected: true, agents: Array.from({ length: 3 }, (_, index) => ({ ...runtime(`recovery-${index}`), agentRole: index ? '  recovery coordination  ' : 'Unblocking Coordinator' })) } };
+  const roster = buildSharedRoster(states);
+  const allocations = new Map();
+  const layout = createSharedLayout(roster, allocations);
   assertFixedDesks(layout);
   assert.equal(layout.placements.size, 3);
   assert.equal(new Set([...layout.placements.values()].map(seat => `${seat.zone}:${seat.slot}`)).size, 3);
   assert.equal(layout.desks.filter(desk => desk.zone === 'reviewers' && desk.occupant).length, 1);
-  assert.equal(layout.desks.find(desk => desk.zone === 'reviewers' && desk.occupant).label, 'Code Reviewer');
+  assert.equal(layout.desks.find(desk => desk.zone === 'reviewers' && desk.occupant).label, 'Recovery Coordination');
   assert.equal(layout.desks.find(desk => desk.zone === 'grok').occupant, null);
-  assert.equal(layout.desks.filter(desk => desk.zone === 'overflow').length, 1);
+  assert.equal(layout.desks.filter(desk => desk.zone === 'overflow').length, 2);
+  const again = createSharedLayout([...roster].reverse(), allocations);
+  for (const agent of roster) assert.deepEqual(position(sharedSeatForAgent(agent, again)), position(sharedSeatForAgent(agent, layout)));
+});
+
+test('unblocking desks require confirmed execution and keep waiting and recorded activity out of running counts', () => {
+  const roster = buildSharedRoster({ grok: { connected: true, agents: [
+    { ...runtime('actual'), agentRole: 'Blocker Triage' },
+    { ...runtime('waiting', 'waiting'), agentRole: 'Recovery Coordination' },
+    { ...runtime('recorded'), agentRole: 'Information Follow-up', executionState: 'unconfirmed' },
+    { ...runtime('idle', 'idle'), agentRole: 'Recovery Verification' },
+    { ...runtime('unobserved'), agentRole: 'Recovery Verification', observed: false },
+  ] } });
+  const layout = createSharedLayout(roster);
+  assertFixedDesks(layout);
+  assert.equal(layout.placements.size, 1);
+  const zone = layout.zones.find(zone => zone.id === 'reviewers');
+  assert.equal(zone.workingCount, 1);
+  assert.ok(zone.unconfirmedCount >= 1);
+  for (const agent of roster) assert.equal(Boolean(sharedSeatForAgent(agent, layout)), agent.runtimeAgents[0].id === 'actual');
 });
 
 test('idle history, waiting, ended, unobserved and unavailable workers never add pods or people', () => {
@@ -122,7 +161,7 @@ test('idle history, waiting, ended, unobserved and unavailable workers never add
   const layout = createSharedLayout([...roster, inconsistent], new Map(), board());
   assert.equal(layout.agents.length, 0);
   assert.equal(layout.placements.size, 0);
-  assert.equal(layout.desks.length, 37);
+  assert.equal(layout.desks.length, 40);
   assert.ok(layout.desks.every(desk => desk.occupant === null));
   for (const agent of roster) assert.equal(sharedSeatForAgent(agent, layout), undefined);
 });
@@ -132,7 +171,7 @@ test('sparse historical provider indices use the fixed work-floor grid without e
   const layout = createSharedLayout(roster);
   assertFixedDesks(layout);
   assert.equal(layout.agents.length, 4);
-  assert.equal(layout.desks.length, 37);
+  assert.equal(layout.desks.length, 40);
   assert.equal(layout.placements.size, 4);
   assert.deepEqual(layout.bounds, createSharedLayout().bounds);
   assert.ok([...layout.placements.values()].every(seat => seat.slot < 2));
@@ -214,7 +253,7 @@ test('management stays at one desk and a compact two-seat meeting table even wit
   assert.ok(contains(manager, manager.meeting.x, manager.meeting.z, manager.meeting.width / 2, manager.meeting.depth / 2));
   for (const desk of layout.desks) assert.equal(overlaps(manager.meeting, rugFor(desk)), false, 'Small meeting area overlaps a workstation');
   assert.equal(layout.desks.filter(desk => desk.zone === 'overflow').length, 24);
-  assert.equal(layout.desks.filter(desk => desk.zone === 'reviewers' && desk.occupant).length, 0, 'Manager overflow cannot take unrelated reviewer pods');
+  assert.equal(layout.desks.filter(desk => desk.zone === 'reviewers' && desk.occupant).length, 0, 'Manager overflow cannot take unrelated unblocking pods');
   assert.equal(layout.placements.size, 25);
 });
 
@@ -239,7 +278,7 @@ test('many actual workers retain personal space at shared benches and clear walk
     const layout = createSharedLayout(roster, new Map(), board());
     assert.equal(layout.placements.size, roster.length);
     assertFixedDesks(layout);
-    assert.ok(layout.desks.length <= roster.length + 37);
+    assert.ok(layout.desks.length <= roster.length + 40);
     for (const zone of layout.zones) assert.ok(contains(layout.bounds, zone.x, zone.z, zone.width / 2, zone.depth / 2), `${zone.id} outside floor`);
     for (const desk of layout.desks) {
       const zone = layout.zones.find(item => item.id === desk.zone);
@@ -346,9 +385,9 @@ test('spacious rooms have usable doorways from the cross aisle and furniture cir
 test('overflow extends the floor without moving existing pods, commons or focus destinations', () => {
   const allocations = new Map(), seats = new Map(), states = { codex: state('codex', 3) };
   const roster = buildSharedRoster(states, seats), original = createSharedLayout(roster, allocations);
-  states.codex = state('codex', 6);
+  states.codex = state('codex', 9);
   const filled = createSharedLayout(buildSharedRoster(states, seats), allocations);
-  assert.equal(filled.desks.length, 37);
+  assert.equal(filled.desks.length, 40);
   assert.deepEqual(filled.bounds, original.bounds);
   states.codex = state('codex', 20);
   const expanded = createSharedLayout(buildSharedRoster(states, seats), allocations);
@@ -362,7 +401,7 @@ test('overflow extends the floor without moving existing pods, commons or focus 
   assert.equal(sharedFocusArea('agent-99999', expanded).type, 'overview');
   states.codex.agents.forEach((agent, index) => { if (index >= 3) agent.status = 'idle'; });
   const quietAgain = createSharedLayout(buildSharedRoster(states, seats), allocations);
-  assert.equal(quietAgain.desks.length, 37, 'Finished overflow workers must not leave extra empty pods');
+  assert.equal(quietAgain.desks.length, 40, 'Finished overflow workers must not leave extra empty pods');
   assert.deepEqual(quietAgain.bounds, original.bounds);
   for (const agent of roster) assert.deepEqual(position(sharedSeatForAgent(agent, quietAgain)), position(sharedSeatForAgent(agent, original)));
 });

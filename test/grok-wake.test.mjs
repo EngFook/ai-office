@@ -76,7 +76,7 @@ test('single-flight wake and timeout prevent overlapping or unbounded webhook ca
 });
 
 test('technical review with no authorization requested never creates an approval question', () => {
-  const task = { id: 'c3300ce0', title: 'Review fixture', kind: 'review', status: 'blocked', error: 'The agent ended without a structured completion confirmation.', result: 'No permissions changed.',
+  const task = { id: 'review-fixture-1', title: 'Review fixture', kind: 'review', status: 'blocked', error: 'The agent ended without a structured completion confirmation.', result: 'No permissions changed.',
     resolution: { state: 'needs_user', nextAction: 'The assigned Claude reviewer should finalize the existing review as standalone JSON, without authorizing merge/deploy.' } };
   assert.equal(humanRequestSpec(task), null);
   assert.equal(humanRequestSpec({ ...task, error: 'No additional approval is required.' }), null);
@@ -266,4 +266,95 @@ test('explicit user re-request gets one additional notification without replayin
   await f.wake.notify([reopened]); assert.equal(f.calls.length, 2);
   f.wake.stop(); f.wake = createGrokWake(f.options);
   await f.wake.notify([reopened]); assert.equal(f.calls.length, 2);
+});
+
+test('dispatch instructions wake the bot once per revision using a separate journal and truthful delivery status', async t => {
+  const f = await fixture(t, { channel: 'instructions', officeUrl: 'http://127.0.0.1:5173', commandInterface: { scriptPath: '/office/scripts/office-board.mjs' } });
+  f.wake.configure({ url: URL, token: SECRET });
+  const instruction = { id: 'instruction-1', status: 'pending', updatedAt: '2026-11-09T01:00:00Z' };
+  assert.equal(f.wake.delivery([instruction])[instruction.id].state, 'queued');
+  await f.wake.notify([instruction]);
+  const body = JSON.parse(f.calls[0].init.body);
+  assert.equal(body.event, 'office.instructions.pending'); assert.deepEqual(body.instructionIds, ['instruction-1']);
+  assert.match(body.message, /pending-instructions/); assert.match(body.message, /apply-plan/); assert.match(body.message, /never.*impersonat|impersonate/);
+  assert.equal(body.officeUrl, 'http://127.0.0.1:5173'); assert.equal(body.questions, undefined);
+  assert.equal(f.wake.delivery([instruction])[instruction.id].state, 'accepted');
+  assert.equal((await f.wake.notify([instruction])).sent, false);
+  f.wake.stop(); f.wake = createGrokWake(f.options);
+  await f.wake.notify([instruction]); assert.equal(f.calls.length, 1);
+  await f.wake.notify([{ ...instruction, status: 'done' }]); assert.equal(f.calls.length, 1);
+  await f.wake.notify([{ ...instruction, updatedAt: '2026-11-09T02:00:00Z' }]); assert.equal(f.calls.length, 2);
+  assert.equal((await stat(path.join(f.home, 'grok-dispatch-wake-state.json'))).mode & 0o777, 0o600);
+  await assert.rejects(access(path.join(f.home, 'grok-wake-state.json')));
+});
+
+
+test('daily reports use a private independent journal and ID/hash-only wake payload; HTTP acceptance is not delivery', async t => {
+  const f = await fixture(t, { channel: 'reports', officeUrl: () => 'http://127.0.0.1:5199', commandInterface: { scriptPath: '/office/scripts/office-board.mjs', commands: ['pending-reports', 'acknowledge-report'] } });
+  f.wake.configure({ url: URL, token: SECRET });
+  const report = { id: 'qwen-daily:2026-11-12', state: 'pending', status: 'pending', reportHash: 'a'.repeat(64), text: 'Private work report contents stay in the local inbox.', summary: SECRET };
+  assert.equal(f.wake.delivery([report])[report.id].state, 'queued');
+  assert.equal(f.wake.delivery([report])[report.id].delivered, false);
+  assert.equal((await f.wake.notify([report, report])).sent, true);
+  assert.equal(f.calls.length, 1);
+  const body = JSON.parse(f.calls[0].init.body);
+  assert.equal(body.event, 'office.daily_reports.pending');
+  assert.deepEqual(body.reportIds, [report.id]);
+  assert.deepEqual(body.reports, [{ id: report.id, reportHash: report.reportHash }]);
+  assert.equal(body.officeUrl, 'http://127.0.0.1:5199');
+  assert.equal(body.scriptPath, '/office/scripts/office-board.mjs');
+  assert.equal(body.commandInterface.scriptPath, body.scriptPath);
+  assert.equal(body.questions, undefined); assert.equal(body.instructions, undefined);
+  assert.ok(!f.calls[0].init.body.includes(report.text)); assert.ok(!f.calls[0].init.body.includes(SECRET));
+  assert.match(body.message, /MUST run office-board.mjs pending-reports/);
+  assert.match(body.message, /Only AFTER actual full-report delivery/);
+  assert.match(body.message, /HTTP 2xx.*not delivery/);
+  assert.equal(report.state, 'pending'); assert.equal(report.status, 'pending');
+  const delivery = f.wake.delivery([report])[report.id];
+  assert.equal(delivery.state, 'accepted'); assert.equal(delivery.delivered, false);
+  assert.equal(delivery.messageId, undefined); assert.equal(delivery.reportHash, report.reportHash);
+  assert.equal((await stat(path.join(f.home, 'grok-report-wake-state.json'))).mode & 0o777, 0o600);
+  await assert.rejects(access(path.join(f.home, 'grok-wake-state.json')));
+  await assert.rejects(access(path.join(f.home, 'grok-dispatch-wake-state.json')));
+  f.wake.stop(); f.wake = createGrokWake(f.options);
+  await f.wake.notify([report]); assert.equal(f.calls.length, 1, 'same report never repeats after a restart');
+  await f.wake.notify([{ ...report, reportHash: 'b'.repeat(64) }]); assert.equal(f.calls.length, 2, 'a genuinely revised report has a distinct notification');
+  await f.wake.notify([{ ...report, state: 'delivered', status: 'delivered', reportHash: 'c'.repeat(64) }]);
+  assert.equal(f.calls.length, 2);
+});
+
+test('daily-report notification validates pending hash-bound identity and retains a bounded retry budget after restart', async t => {
+  const f = await fixture(t, { channel: 'reports', retryMs: 100, maxAttempts: 2, fetchImpl: async () => ({ ok: false }) });
+  f.wake.configure({ url: URL, token: SECRET });
+  const report = { id: 'r'.repeat(240), state: 'pending', reportHash: 'e'.repeat(64) };
+  for (const invalid of [null, report.id, { ...report, reportHash: 'old' }, { ...report, id: '' }, { ...report, status: 'delivered' }, { ...report, state: 'delivered' }]) {
+    assert.equal((await f.wake.notify([invalid])).sent, false);
+    assert.deepEqual(f.wake.delivery([invalid]), {});
+  }
+  await f.wake.notify([report]); assert.equal(f.wake.delivery([report])[report.id].state, 'retrying');
+  f.at += 101; await f.wake.notify([report]);
+  assert.equal(f.wake.delivery([report])[report.id].state, 'failed');
+  f.wake.stop(); f.wake = createGrokWake(f.options);
+  assert.equal(f.wake.delivery([report])[report.id].attempts, 2, 'compound persisted keys remain bounded for maximum-length report IDs');
+  f.at += 101; assert.equal((await f.wake.notify([report])).sent, false);
+  assert.equal(f.wake.delivery([report])[report.id].attempts, 2);
+  assert.equal(f.wake.delivery([report])[report.id].delivered, false);
+  assert.match(f.wake.status().error, /Reports remain pending/);
+});
+
+
+test('stopping a report notifier waits for the aborted transport before its replacement can start', async t => {
+  let cleanupComplete = false;
+  const f = await fixture(t, { channel: 'reports', fetchImpl: async (_url, options) => new Promise((_resolve, reject) => {
+    options.signal.addEventListener('abort', () => setTimeout(() => { cleanupComplete = true; reject(new Error('aborted')); }, 10), { once: true });
+  }) });
+  f.wake.configure({ url: URL, token: SECRET });
+  const report = { id: 'daily:stop', state: 'pending', reportHash: 'd'.repeat(64) };
+  const sending = f.wake.notify([report]);
+  const stopping = f.wake.stop();
+  assert.equal(cleanupComplete, false);
+  await stopping;
+  assert.equal(cleanupComplete, true); assert.equal((await sending).sent, false);
+  assert.equal(f.wake.delivery([report])[report.id].delivered, false);
+  assert.equal((await f.wake.notify([report])).sent, false);
 });

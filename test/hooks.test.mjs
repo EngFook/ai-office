@@ -4,6 +4,8 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, stat, rm, symlink } from 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+// The hook walks real parent processes; stub that out so running inside Claude Code is deterministic.
+const noAncestorEnv = () => ({ ...process.env, AI_OFFICE_HOOK_ANCESTOR_LOOKUP: 'off' });
 import { connectClaude, HOOK_EVENTS } from '../scripts/connect-claude.mjs';
 
 async function fixture(t) {
@@ -107,7 +109,7 @@ test('installed hook records lifecycle metadata without prompts, arguments, resu
     tool_response: 'secret-tool-result', last_assistant_message: 'secret-model-output', message: 'secret-notification-text',
     pid: 999999, timestamp: 'spoofed', notification_type: 'ignored-outside-notification',
   };
-  const execution = spawnSync('/bin/sh', ['-c', command], { input: JSON.stringify(input), encoding: 'utf8', timeout: 2000 });
+  const execution = spawnSync('/bin/sh', ['-c', command], { input: JSON.stringify(input), encoding: 'utf8', timeout: 2000, env: noAncestorEnv() });
   assert.equal(execution.status, 0);
   assert.equal(execution.stdout, '');
   assert.equal(execution.stderr, '');
@@ -128,7 +130,7 @@ test('installed hook records lifecycle metadata without prompts, arguments, resu
 test('hook drops invalid and oversized input, sanitizes optional fields and gives notifications their type', async t => {
   const { claudeDir } = await fixture(t);
   const result = await connectClaude({ claudeDir });
-  const run = input => spawnSync(process.execPath, [result.hookPath], { input, encoding: 'utf8', timeout: 2000 });
+  const run = input => spawnSync(process.execPath, [result.hookPath], { input, encoding: 'utf8', timeout: 2000, env: noAncestorEnv() });
   for (const input of ['not json', '[]', JSON.stringify({ hook_event_name: 'Unknown', session_id: 'session' }), JSON.stringify({ hook_event_name: 'Stop', session_id: 'bad\nidentifier' }), ' '.repeat(1024 * 1024 + 1)]) {
     const output = run(input);
     assert.equal(output.status, 0);
@@ -154,4 +156,21 @@ test('hook drops invalid and oversized input, sanitizes optional fields and give
   assert.ok(failure);
   assert.deepEqual(Object.keys(failure.data).sort(), ['event', 'sessionId', 'timestamp']);
   assert.ok(!JSON.stringify(failure.data).includes('secret'));
+});
+
+
+test('ordinary Claude installation connects observer without gamedev plugin or generated specialists', async t => {
+  const root = await mkdtemp(path.join(tmpdir(), 'office-generic-hook-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const claudeDir = path.join(root, '.claude');
+  await mkdir(claudeDir);
+  const original = { permissions: { allow: ['Read'] }, model: 'user-choice' };
+  await writeFile(path.join(claudeDir, 'settings.json'), JSON.stringify(original));
+  const result = await connectClaude({ claudeDir });
+  assert.equal(result.specialists, 0); assert.equal(result.router, null); assert.equal(result.pluginRoot, null);
+  const saved = JSON.parse(await readFile(path.join(claudeDir, 'settings.json'), 'utf8'));
+  assert.deepEqual(saved.permissions, original.permissions); assert.equal(saved.model, original.model);
+  for (const event of HOOK_EVENTS) assert.equal(saved.hooks[event].length, 1);
+  await assert.rejects(stat(path.join(claudeDir, 'agents')), { code: 'ENOENT' });
+  assert.equal((await connectClaude({ claudeDir })).changedFiles, 0);
 });

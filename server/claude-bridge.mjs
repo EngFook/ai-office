@@ -1,9 +1,14 @@
+import { compactNativeStatus } from './native-status-view.mjs';
 import { readdir, readFile, lstat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { createClaudeWorkspaceReader } from './claude-workspace.mjs';
+import { createClaudeBackgroundReader } from './claude-background.mjs';
+import { createClaudeSync, createClaudeLifecycleIndex } from './claude-sync.mjs';
+import { createClaudeExecutionReader, reconcileClaudeExecution } from './claude-execution.mjs';
 
-// This bridge only reads the installation catalog and the hook's metadata inbox.
-// It never opens transcripts, runs agents, or accepts event writes over HTTP.
+// Status reconciles hook metadata with bounded transcript lifecycle fields.
+// Only the on-demand workspace exposes filtered visible activity; neither runs agents.
 const EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'Notification', 'Stop', 'StopFailure', 'SessionEnd', 'SubagentStart', 'SubagentStop']);
 const WAITING = new Set(['permission_prompt', 'elicitation_dialog', 'elicitation_url_dialog', 'agent_needs_input']);
 const REQUIRED_HOOKS = [...EVENTS];
@@ -113,6 +118,7 @@ export function sanitizeEvent(raw) {
     event, sessionId, timestamp,
     agentId: identifier(raw.agentId || raw.agent_id),
     agentType: identifier(raw.agentType || raw.agent_type),
+    parentAgentId: identifier(raw.parentAgentId || raw.parent_agent_id),
     cwd: cleanCwd(raw.cwd), tool,
     skill: tool === 'Skill' ? identifier(raw.skill || raw.tool_input?.skill) : '',
     notificationType: identifier(raw.notificationType || raw.notification_type),
@@ -136,7 +142,7 @@ export function reconstructAgents(input, skills = [], { isProcessAlive } = {}) {
     // SessionStart describes the session's primary agent, including --agent
     // sessions. Remember its ID if a Claude host supplies one in common fields.
     if (event.event === 'SessionStart') mainAgentIds.set(event.sessionId, event.agentId);
-    const mainLifecycle = ['SessionStart', 'Stop', 'StopFailure'].includes(event.event);
+    const mainLifecycle = event.event === 'SessionStart';
     const isSubagent = !mainLifecycle && Boolean(event.agentId) && event.agentId !== mainAgentIds.get(event.sessionId);
     const id = isSubagent ? `${event.sessionId}:${event.agentId}` : mainId;
     if (event.event === 'SessionEnd') {
@@ -166,7 +172,7 @@ export function reconstructAgents(input, skills = [], { isProcessAlive } = {}) {
     }
     let agent = agents.get(id);
     if (!agent) {
-      agent = { id, sessionId: event.sessionId, agentType: event.agentType || (isSubagent ? 'subagent' : 'main'), name: event.agentType || (isSubagent ? 'Claude subagent' : 'Claude Code'), status: 'idle', cwd: '', tool: null, lastTool: null, lastToolAt: null, lastToolOutcome: null, skillId: null, updatedAt: null, isSubagent, pid: null };
+      agent = { id, sessionId: event.sessionId, agentType: event.agentType || (isSubagent ? 'subagent' : 'main'), name: event.agentType || (isSubagent ? 'Claude subagent' : 'Claude Code'), agentId: event.agentId || null, parentAgentId: isSubagent ? (event.parentAgentId ? `${event.sessionId}:${event.parentAgentId}` : mainId) : null, parentSessionId: isSubagent ? event.sessionId : null, status: 'idle', cwd: '', tool: null, lastTool: null, lastToolAt: null, lastToolOutcome: null, skillId: null, updatedAt: null, isSubagent, pid: null };
       agents.set(id, agent);
     }
     if (event.cwd) agent.cwd = event.cwd;
@@ -193,6 +199,7 @@ export function reconstructAgents(input, skills = [], { isProcessAlive } = {}) {
       else if (event.notificationType === 'elicitation_complete' || event.notificationType === 'elicitation_response') agent.status = 'working';
     } else if (event.event === 'StopFailure') {
       Object.assign(agent, { status: 'waiting', tool: null, skillId: null });
+      if (isSubagent) stoppedAgents.add(id);
     } else if (event.event === 'Stop' || event.event === 'SubagentStop') {
       Object.assign(agent, { status: 'idle', tool: null, skillId: null });
       if (event.event === 'SubagentStop') stoppedAgents.add(id);
@@ -202,6 +209,12 @@ export function reconstructAgents(input, skills = [], { isProcessAlive } = {}) {
     if (agent.pid && isProcessAlive && !isProcessAlive(agent.pid)) Object.assign(agent, { status: 'offline', tool: null, skillId: null });
     // pid is internal liveness evidence, not part of the browser payload.
     delete agent.pid;
+    // A start/tool hook records lifecycle, not live execution or Claude's
+    // in-memory workflow progress. Never turn that absence into 'stalled'.
+    agent.executionState = agent.status === 'working' ? 'unconfirmed' : agent.status;
+    agent.activityPhase = agent.status === 'working' ? agent.tool ? 'tool-pending' : 'between-hooks' : agent.status;
+    agent.lastEventAt = agent.updatedAt;
+    agent.observationSource = 'claude-lifecycle-hooks';
   }
   return [...agents.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
 }
@@ -214,22 +227,25 @@ async function hookInstalled(claudeHome) {
   return REQUIRED_HOOKS.every(event => (settings.hooks?.[event] || []).some(group => (group.hooks || []).some(hook => hook.type === 'command' && typeof hook.command === 'string' && /ai-office[\/\\]/.test(hook.command))));
 }
 
-async function discoverSessions(claudeHome, isProcessAlive) {
+async function discoverSessions(claudeHome, isProcessAlive, health = {}) {
   const directory = path.join(claudeHome, 'sessions');
-  const files = await readdir(directory, { withFileTypes: true }).catch(() => []);
+  let files;
+  health.unreadableRecords = 0;
+  try { files = await readdir(directory, { withFileTypes: true }); health.available = true; }
+  catch (error) { health.available = false; health.error = error.code === 'ENOENT' ? null : 'Session metadata could not be read'; files = []; }
   const sessions = new Map();
   for (const file of files) {
     if (!file.isFile() || file.isSymbolicLink() || !/^[a-zA-Z0-9_.-]+\.json$/.test(file.name)) continue;
     const metadata = await readJson(path.join(directory, file.name));
     const sessionId = identifier(metadata?.sessionId);
     const pid = Number(metadata?.pid);
-    if (!sessionId || !Number.isSafeInteger(pid) || pid < 2) continue;
+    if (!sessionId || !Number.isSafeInteger(pid) || pid < 2) { health.unreadableRecords++; continue; }
     const alive = isProcessAlive(pid);
     // Retain dead-PID evidence for recorded events even though dead metadata
     // alone does not add a historical agent to the visible roster.
     if (sessions.get(sessionId)?.alive && !alive) continue;
     const started = typeof metadata.startedAt === 'number' ? metadata.startedAt : Date.parse(metadata.startedAt);
-    sessions.set(sessionId, { pid, alive, agent: { id: `${sessionId}:main`, sessionId, agentType: 'main', name: 'Claude Code', status: 'idle', cwd: cleanCwd(metadata.cwd), tool: null, lastTool: null, lastToolAt: null, lastToolOutcome: null, skillId: null, updatedAt: Number.isFinite(started) && started > 0 && started < 8640000000000000 ? new Date(started).toISOString() : null, isSubagent: false, lastEvent: 'Discovered', observed: false } });
+    sessions.set(sessionId, { pid, alive, startedAt: started, agent: { id: `${sessionId}:main`, sessionId, agentType: 'main', name: 'Claude Code', status: 'idle', cwd: cleanCwd(metadata.cwd), tool: null, lastTool: null, lastToolAt: null, lastToolOutcome: null, skillId: null, updatedAt: Number.isFinite(started) && started > 0 && started < 8640000000000000 ? new Date(started).toISOString() : null, isSubagent: false, lastEvent: 'Discovered', observed: false, executionState: 'unconfirmed', activityPhase: 'session-detected', lastEventAt: null, observationSource: 'claude-session-metadata' } });
   }
   return sessions;
 }
@@ -238,22 +254,69 @@ function processAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
 }
 
-export async function readClaudeStatus({ claudeHome = defaultClaudeHome(), isProcessAlive = processAlive } = {}) {
-  const inbox = path.join(claudeHome, 'ai-office', 'events');
-  const [skills, installed, files, discovered] = await Promise.all([discoverSkills(claudeHome), hookInstalled(claudeHome), readdir(inbox, { withFileTypes: true }).catch(() => []), discoverSessions(claudeHome, isProcessAlive)]);
-  const events = [];
-  for (const file of files) {
-    if (!file.isFile() || file.isSymbolicLink() || !/^[a-zA-Z0-9_.-]+\.json$/.test(file.name)) continue;
-    const event = sanitizeEvent(await readJson(path.join(inbox, file.name)));
-    if (event) events.push(event);
+// Cache only sanitized metadata. Direct callers reconcile all records; the
+// bridge supplies named watcher changes between periodic complete reconciles.
+export async function readLifecycleEvents(inbox, cache = new Map(), health = {}, { changedFiles } = {}) {
+  let names;
+  health.unreadableRecords = 0;
+  if (changedFiles === undefined) {
+    let entries;
+    try { entries = await readdir(inbox, { withFileTypes: true }); health.available = true; }
+    catch { health.available = false; entries = []; }
+    names = entries.filter(file => file.isFile() && !file.isSymbolicLink() && /^[a-zA-Z0-9_.-]+\.json$/.test(file.name)).map(file => file.name);
+    const found = new Set(names);
+    for (const name of cache.keys()) if (!found.has(name)) cache.delete(name);
+  } else {
+    health.available = true;
+    names = changedFiles.filter(name => typeof name === 'string' && /^[a-zA-Z0-9_.-]+\.json$/.test(name));
   }
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(32, names.length) }, async () => {
+    while (cursor < names.length) {
+      const name = names[cursor++], file = path.join(inbox, name);
+      try {
+        const stat = await lstat(file);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_JSON_BYTES) { cache.set(name, { event: null }); continue; }
+        const signature = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+        let entry = cache.get(name);
+        if (!entry || entry.signature !== signature) {
+          let event = null;
+          try { event = sanitizeEvent(JSON.parse(await readFile(file, 'utf8'))); } catch {}
+          entry = { signature, event };
+          cache.set(name, entry);
+        }
+      } catch (error) {
+        if (error.code === 'ENOENT') cache.delete(name);
+        else cache.set(name, { event: null });
+      }
+    }
+  }));
+  const events = [];
+  for (const entry of cache.values()) {
+    if (entry.event) events.push(entry.event);
+    else health.unreadableRecords++;
+  }
+  return events;
+}
+
+export async function readClaudeStatus({ claudeHome = defaultClaudeHome(), isProcessAlive = processAlive, eventCache, lifecycleReader, executionReader, now = Date.now() } = {}) {
+  const inbox = path.join(claudeHome, 'ai-office', 'events');
+  const lifecycleHealth = {}, sessionHealth = {};
+  const [skills, installed, events, discovered] = await Promise.all([discoverSkills(claudeHome), hookInstalled(claudeHome), (lifecycleReader ? lifecycleReader(lifecycleHealth) : readLifecycleEvents(inbox, eventCache, lifecycleHealth)), discoverSessions(claudeHome, isProcessAlive, sessionHealth)]);
   const enriched = events.map(event => event.pid || !discovered.has(event.sessionId) ? event : { ...event, pid: discovered.get(event.sessionId).pid });
   const agents = reconstructAgents(enriched, skills, { isProcessAlive });
   for (const agent of agents) agent.observed = true;
   for (const { agent, alive } of discovered.values()) if (alive && !agents.some(recorded => recorded.id === agent.id)) agents.push(agent);
+  const readExecution = executionReader || createClaudeExecutionReader({ claudeHome });
+  const transcriptMetadata = await readExecution(agents.filter(agent => agent.status === 'working' && agent.observed));
+  reconcileClaudeExecution(agents, discovered, enriched, transcriptMetadata, { now });
   const updatedAt = events.length ? new Date(events.reduce((latest, event) => Math.max(latest, event.timestamp), 0)).toISOString() : null;
   const liveAgentCount = agents.filter(agent => agent.status !== 'offline').length;
-  return { connected: liveAgentCount > 0, hookInstalled: installed, updatedAt, lastEventAt: updatedAt, liveAgentCount, topicSkillCount: skills.filter(skill => skill.category !== 'router').length, skills, agents, eventCount: events.length, source: 'Claude Code local lifecycle hooks', privacy: 'Lifecycle metadata only; no prompts, transcripts, tool arguments, or outputs are read.' };
+  const metadataAvailable = lifecycleHealth.available === true && !lifecycleHealth.unreadableRecords && !sessionHealth.error && !sessionHealth.unreadableRecords;
+  if (!metadataAvailable) for (const agent of agents) if (agent.status !== 'offline') agent.executionState = 'unconfirmed';
+  const executionCounts = agents.filter(agent => agent.status !== 'offline').reduce((counts, agent) => { counts[agent.executionState] = (counts[agent.executionState] || 0) + 1; return counts; }, {});
+  const sourceErrors = [...(!lifecycleHealth.available ? ['Lifecycle event directory is unavailable'] : []), ...(lifecycleHealth.unreadableRecords ? ['Some lifecycle records could not be read'] : []), ...(sessionHealth.error ? [sessionHealth.error] : []), ...(sessionHealth.unreadableRecords ? ['Some session metadata could not be read'] : [])];
+  return { observedAt: new Date(now).toISOString(), metadataAvailable, executionCounts, sourceErrors, sourceHealth: { lifecycle: lifecycleHealth, sessions: sessionHealth }, coverage: 'Running requires recent per-agent lifecycle or transcript activity and a live matching session process. Evidence expires after 120 seconds without activity; silent execution and in-memory workflow state remain unconfirmed.', connected: liveAgentCount > 0, hookInstalled: installed, updatedAt, lastEventAt: updatedAt, liveAgentCount, topicSkillCount: skills.filter(skill => skill.category !== 'router').length, skills, agents, eventCount: events.length, source: 'Claude Code local lifecycle hooks', privacy: 'Lifecycle metadata and bounded transcript lifecycle fields only; prompts, reasoning, tool arguments and outputs are never returned or retained by the status reader.' };
 }
 
 function isLoopback(address = '') {
@@ -273,27 +336,55 @@ function allowRequest(request) {
 }
 
 export function claudeBridge(options = {}) {
+  const claudeHome = options.claudeHome || defaultClaudeHome();
+  const lifecycle = createClaudeLifecycleIndex({ inbox: path.join(claudeHome, 'ai-office', 'events'), readEvents: readLifecycleEvents });
+  const readExecution = createClaudeExecutionReader({ claudeHome });
+  const readWorkspace = createClaudeWorkspaceReader({ claudeHome: options.claudeHome || defaultClaudeHome() });
+  const background = createClaudeBackgroundReader({ claudeHome: options.claudeHome || defaultClaudeHome() });
+  let workspacePending = null;
   let cached = null;
   let refreshedAt = 0;
   let pending = null;
+  let generation = 0;
+  const sync = createClaudeSync({ claudeHome, onInvalidate(source, name) {
+    if (source === 'lifecycle') lifecycle.invalidate(name);
+    generation++; refreshedAt = 0;
+  } });
   const middleware = async (request, response, next) => {
     const url = request.url?.split('?')[0];
-    if (url !== '/api/claude/status') return next();
+    if (!['/api/claude/status', '/api/claude/workspace', '/api/claude/background-tasks', '/api/claude/events'].includes(url)) return next();
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.setHeader('X-Content-Type-Options', 'nosniff');
     if (!allowRequest(request)) { response.statusCode = 403; response.end('{"error":"Local same-origin access only"}'); return; }
     if (request.method !== 'GET') { response.statusCode = 405; response.setHeader('Allow', 'GET'); response.end('{"error":"Read-only endpoint"}'); return; }
+    const compact = url === '/api/claude/status' && new URL(request.url, 'http://localhost').searchParams.get('view') === 'agents';
+    if (options.enabled === false) { const disabled = { connected: false, enabled: false, agents: [], skills: [], error: null }; response.end(JSON.stringify(compact ? compactNativeStatus(disabled) : disabled)); return; }
+    if (url === '/api/claude/events') { sync.attach(request, response); return; }
     try {
       if (!cached || Date.now() - refreshedAt > 1000) {
-        pending ||= readClaudeStatus(options).then(result => { cached = result; refreshedAt = Date.now(); return result; }).finally(() => { pending = null; });
+        const readingGeneration = generation;
+        pending ||= readClaudeStatus({ ...options, lifecycleReader: lifecycle.read, executionReader: readExecution }).then(result => { cached = result; refreshedAt = readingGeneration === generation ? Date.now() : 0; return result; }).finally(() => { pending = null; });
         await pending;
       }
-      response.end(JSON.stringify(cached));
+      if (url === '/api/claude/background-tasks') {
+        await background.refresh(cached);
+        const params = Object.fromEntries(new URL(request.url, 'http://localhost').searchParams);
+        response.end(JSON.stringify(background.snapshot(params)));
+      } else if (url === '/api/claude/workspace') {
+        workspacePending ||= readWorkspace(cached).finally(() => { workspacePending = null; });
+        response.end(JSON.stringify(await workspacePending));
+      } else response.end(JSON.stringify(compact ? compactNativeStatus(cached) : cached));
     } catch {
       response.statusCode = 500;
       response.end('{"error":"Claude activity is temporarily unavailable"}');
     }
   };
-  return { name: 'ai-office-claude-bridge', configureServer(server) { server.middlewares.use(middleware); }, configurePreviewServer(server) { server.middlewares.use(middleware); } };
+  function configure(server) {
+    if (options.enabled !== false) sync.start();
+    server.middlewares.use(middleware);
+    server.httpServer?.once('close', sync.close);
+    server.watcher?.once('close', sync.close);
+  }
+  return { name: 'ai-office-claude-bridge', configureServer: configure, configurePreviewServer: configure, closeBundle: sync.close };
 }

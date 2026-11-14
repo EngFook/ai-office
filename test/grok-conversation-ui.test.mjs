@@ -1,0 +1,30 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { createServer } from 'vite';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+
+test('actual Grok mirror renders literal source messages, coverage, pagination and no outgoing chat controls', async t => {
+  const cacheDir = await mkdtemp(path.join(os.tmpdir(), 'grok-ui-test-'));
+  const vite = await createServer({ cacheDir, configFile: false, optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true, hmr: false }, appType: 'custom' });
+  t.after(async () => { await vite.close(); await rm(cacheDir, { recursive: true, force: true }); });
+  const { GrokConversationView, reconcileGrokSnapshot } = await vite.ssrLoadModule('/src/GrokConversation.jsx');
+  const conversation = { phase: 'ready', botId: 'b1', bots: [{ id: 'b1', name: 'Synthetic Bot' }, { id: 'b2', name: 'Synthetic Bot 2' }], messages: [{ id: '1', sourceMessageId: 'source-1', timestamp: '2026-11-09T01:00:00.000Z', role: 'user', text: '<script>fake</script>' }], hasMore: true, cachedAt: '2026-11-09T01:00:00.000Z', checkedAt: '2026-11-10T01:00:00.000Z', sourceEntryCount: 200, visibleMessageCount: 230, earlierHistoryOmitted: true };
+  const render = props => renderToStaticMarkup(React.createElement(GrokConversationView, { lang: 'zh', ...props }));
+  const html = render({ conversation });
+  assert.match(html, /当前不是完整历史/); assert.match(html, /加载较早的缓存消息/); assert.match(html, /&lt;script&gt;/); assert.match(html, /source-1/); assert.match(html, /200/);
+  assert.doesNotMatch(html, /<(?:form|textarea|input|script)\b|contenteditable|href=/i);
+  const failed = render({ conversation: { ...conversation, phase: 'unavailable', error: 'SOURCE_UNAVAILABLE' } });
+  assert.doesNotMatch(failed, /source-1|&lt;script&gt;/); assert.match(failed, /未显示旧缓存/);
+  assert.match(render({}), /没有找到已缓存/);
+  const prior = { ...conversation, revision: 'old', nextCursor: 'old:80' }, incoming = { ...conversation, revision: 'new', messages: [{ ...conversation.messages[0], id: '2' }] };
+  const held = reconcileGrokSnapshot(prior, incoming, { automatic: true, follow: false });
+  assert.equal(held.messages[0].id, '1'); assert.equal(held.newCacheAvailable, true); assert.equal(held.hasMore, false); assert.match(render({ conversation: held }), /保留你正在阅读的旧片段/);
+  assert.equal(reconcileGrokSnapshot(held, incoming).messages[0].id, '2');
+  assert.equal(reconcileGrokSnapshot(prior, incoming, { automatic: true, follow: true }).messages[0].id, '2');
+  assert.equal(reconcileGrokSnapshot(prior, { phase: 'unavailable', error: 'STALE_CURSOR', messages: [] }, { older: true }).newCacheAvailable, true);
+  assert.equal(reconcileGrokSnapshot(prior, { phase: 'unavailable', error: 'SOURCE_UNAVAILABLE', messages: [] }).messages.length, 0);
+});

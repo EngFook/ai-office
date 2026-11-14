@@ -2,10 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { filterBoardTasks, taskAgentProvider, taskWaitSummary } from '../src/task-board-ui.js'
 
-test('Grok Bot filter keeps task states and project worktree grouping separate from management', () => {
+test('Grok Bot filter keeps task states and exact project paths separate from management', () => {
   const tasks = ['pending', 'running', 'blocked', 'done'].map(status => ({ id: status, status, provider: 'grok-bot', projectPath: '/tmp/aio-bot-board' }))
   tasks.push({ id: 'management', provider: 'grok', projectPath: '/work/ai-office' }, { id: 'claude', provider: 'claude', projectPath: '/work/ai-office' }, { id: 'other-project', provider: 'grok-bot', projectPath: '/work/other' })
-  assert.deepEqual(filterBoardTasks(tasks, { provider: 'grok-bot', projectPath: '/work/ai-office' }).map(task => task.id), ['pending', 'running', 'blocked', 'done'])
+  assert.deepEqual(filterBoardTasks(tasks, { provider: 'grok-bot', projectPath: '/tmp/aio-bot-board' }).map(task => task.id), ['pending', 'running', 'blocked', 'done'])
 })
 
 test('Grok Bot identity is not collapsed into Grok management', () => {

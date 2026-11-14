@@ -93,7 +93,8 @@ export function ambientSpots(commons) {
   }))
   return [...aisleStops, ...CENTRAL_SOCIAL.stops.map((stop, i) => ({
     ...stop, id: `ambient:central:${i}`, kind: 'ambient', sit: false,
-    path: [[stop.x, -7], [16, -7], [16, AISLE_Z]],
+    // Pass behind the third Codex row, between its chairs and the planter.
+    path: [[stop.x, -13.5], [16, -13.5], [16, AISLE_Z]],
   }))]
 }
 const seed = id => [...id].reduce((n, c) => (n * 31 + c.charCodeAt(0)) >>> 0, 0)

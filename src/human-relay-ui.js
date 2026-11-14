@@ -1,3 +1,19 @@
+export function humanRequestNeedsUser(request) {
+  return !!request && ['pending', 'delivered'].includes(request.state) &&
+    (request.state === 'delivered' || request.kind === 'approval' || request.requiresUserAction === true || request.triage?.outcome === 'needs_user')
+}
+
+export function humanRequestGroups(requests = [], tasks = []) {
+  const byId = new Map(tasks.map(task => [task.id, task]))
+  const current = requests.filter(request => ['pending', 'delivered', 'denied'].includes(request.state) &&
+    byId.get(request.taskId)?.status === 'blocked' && byId.get(request.taskId)?.humanGate?.requestId === request.id)
+  return {
+    needsUser: current.filter(humanRequestNeedsUser),
+    grokCheck: current.filter(request => request.state !== 'denied' && !humanRequestNeedsUser(request)),
+    denied: current.filter(request => request.state === 'denied'),
+  }
+}
+
 export function openHumanRequests(requests) {
   return (Array.isArray(requests) ? requests : []).filter(request => request && ['pending', 'delivered'].includes(request.state));
 }
@@ -17,7 +33,8 @@ export function questionActionPayload(request, action, reply = '', projectPath =
   if (action === 'rerequest') return base
   const decision = action === 'restored' ? 'provide_info' : action
   if (!['provide_info', 'approve', 'deny'].includes(decision) || request.kind === 'info' && decision === 'approve' || request.kind === 'approval' && decision === 'provide_info') throw new Error(zh ? '请选择与问题对应的操作。' : 'Choose an action matching this question.')
-  const userReply = value
+  const userReply = request.approvalScope ? reply : value
+  if (action === 'approve' && request.approvalScope && !value) throw new Error(zh ? '批准准备工作前，请明确填写“同意净化准备方案”。拒绝可直接点击。' : 'To approve preparation, type “I approve sanitized snapshot preparation”. You can decline without entering text.')
   if (action === 'provide_info' && !userReply) throw new Error(zh ? '请先填写要补充的资料。' : 'Enter the missing information first.')
   if (projectPath.trim() && (decision !== 'provide_info' || !projectPath.trim().startsWith('/') || !userReply.includes(projectPath.trim()))) throw new Error(zh ? '请填写已有目录的完整路径，并在回复中明确写出同一路径。' : 'Use an existing absolute directory and include that exact path in your reply.')
   return { ...base, decision, userAction: action, userReply, ...(projectPath.trim() ? { projectPath: projectPath.trim() } : {}) }
@@ -25,6 +42,8 @@ export function questionActionPayload(request, action, reply = '', projectPath =
 
 export function questionErrorMessage(message = '', zh = true) {
   if (!zh) return message || 'Could not save. Your draft is preserved.'
+  if (/Scoped approval requires an explicit affirmative/i.test(message)) return '未执行批准。请填写“同意净化准备方案”；可补充“保留旧本地历史和未提交改动，不批准最终合并”。其他条件需要先修改任务并重新确认。'
+  if (/partial or conditional legacy|explicit action binding/i.test(message)) return '未执行批准。这项问题尚未单独绑定你填写的条件；请先修改任务范围并重新生成问题，再作决定。'
   if (/binding|changed|no longer|unanswered question/i.test(message)) return '问题已更新或已处理。请打开最新问题后重试；当前输入不会丢失。'
   if (/project.*(?:unavailable|exist|folder)|replacement folder/i.test(message)) return '原项目目录仍不可用。请恢复原目录，或在回复和“新目录”栏填写同一个已有目录的完整路径。'
   if (/five re-requests/i.test(message)) return '这个问题已重新请求五次。请直接补充新资料或作出决定，避免重复打扰。'

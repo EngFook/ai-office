@@ -1,5 +1,5 @@
 {
-  "name": "ai-office-singapore",
+  "name": "ai-office",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -7,11 +7,17 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "node --test test/*.test.mjs",
+    "test": "node scripts/run-tests.mjs",
     "connect:claude": "node scripts/connect-claude.mjs",
     "mobile": "node scripts/mobile-office.mjs",
     "mobile:install": "node scripts/install-mobile-office.mjs",
-    "mobile:link": "node scripts/mobile-link.mjs"
+    "mobile:link": "node scripts/mobile-link.mjs",
+    "app:install": "node scripts/install-mac-app.mjs",
+    "setup": "node scripts/setup-office.mjs",
+    "migrate": "node scripts/migrate-office.mjs",
+    "package:source": "node scripts/package-office.mjs",
+    "start": "node scripts/start-office.mjs",
+    "doctor": "node scripts/doctor-office.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.6",
@@ -25,5 +31,6 @@
   },
   "engines": {
     "node": ">=24"
-  }
+  },
+  "license": "MIT"
 }

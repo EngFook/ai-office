@@ -3,7 +3,7 @@ import { WATCH_RECIPIENTS } from './watch-task-policy.mjs';
 import { blockingKey, meetingScope, meetingBlocked, meetingBarrierAllows, parseMeetingDecisions } from './blocked-meeting-policy.mjs';
 import { createMeetingRoom } from './meeting-room.mjs';
 
-const INTERVAL = 10 * 60000; // Same persisted delivery budget as 424719dc / 7963081a.
+const INTERVAL = 10 * 60000; // Same persisted per-provider delivery budget as the Qwen watch reminders.
 const owner = task => task.provider === 'any' ? 'claude' : task.provider;
 export function createBlockedMeetings({ store, decide, canRun = () => true, room = createMeetingRoom(), now = Date.now, onTaskChange = () => {} } = {}) {
   let stopped = false, active, restored = false;

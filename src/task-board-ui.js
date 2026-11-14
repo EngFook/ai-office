@@ -1,57 +1,53 @@
+import { localQwenTaskError } from '../server/local-qwen-policy.mjs'
+
 const providerNames = { claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini', grok: 'Grok', 'grok-bot': 'Grok Bot', 'local-qwen': 'Local Qwen' }
 
-// Known projects own every folder whose path contains a matching segment, so the main
-// checkout, its worktrees (walkalone-*, /tmp/aio-*) and subfolders (reports/research)
-// share one board. Any other folder stays its own project, keyed by its full path.
-const knownProjects = [
-  { key: 'project:walkalone', name: '退界', root: 'walkalone', match: /^walkalone(?:[-_.].*)?$/i },
-  { key: 'project:ai-office', name: 'AI-Office', root: 'ai-office', match: /^(?:ai-office(?:[-_.].*)?|aio(?:[-_.].*)?)$/i },
-]
+// Without an owner catalog, folders remain independent. An explicit catalog
+// groups approved aliases for display only; execution paths stay unchanged.
 export function taskProjectPath(path) {
   const value = String(path || '').trim()
   return value.replace(/\/+$/, '') || (value.startsWith('/') ? '/' : '')
 }
-function knownProject(path) {
-  const segments = taskProjectPath(path).split(/[\\/]/).filter(Boolean)
-  // The deepest matching folder wins, e.g. a walkalone checkout inside an aio-* scratch folder.
-  for (let index = segments.length - 1; index >= 0; index--) {
-    const project = knownProjects.find(item => item.match.test(segments[index]))
-    if (project) return { project, isRoot: index === segments.length - 1 && segments[index].toLowerCase() === project.root }
-  }
-  return null
+function catalogProject(folder, catalog = []) {
+  return catalog.flatMap(project => [project.path, ...(project.folders || [])].filter(Boolean).map(root => ({ project, root:taskProjectPath(root) })))
+    .filter(({root}) => folder === root || folder.startsWith(`${root}/`)).sort((a,b)=>b.root.length-a.root.length)[0]?.project
 }
-export function taskProjectKey(path) {
-  return knownProject(path)?.project.key ?? taskProjectPath(path)
-}
+export function taskProjectKey(path, catalog = []) { const folder=taskProjectPath(path); return catalogProject(folder,catalog)?.path || folder }
 export function taskProjectName(path) {
-  const known = knownProject(path)
-  if (known) return known.project.name
   const normalized = taskProjectPath(path)
   return normalized.split(/[\\/]/).filter(Boolean).pop() || (normalized ? '/' : 'Needs project folder')
 }
-
-const knownRank = key => { const index = knownProjects.findIndex(project => project.key === key); return index < 0 ? knownProjects.length : index }
-// path is the project's main folder (most used root checkout), used as the default for new requests.
-export function taskProjects(tasks) {
+// Use the same supplied-text rules as pickup; a missing folder alone is not a blocker.
+export function taskProjectDisplay(task = {}) {
+  const path = taskProjectPath(task.projectPath)
+  const textOnly = !path && task.provider === 'local-qwen' && !localQwenTaskError(task)
+  return {
+    textOnly, needsProject: !path && !textOnly,
+    name: textOnly ? 'Text-only assistance' : taskProjectName(path),
+    detail: textOnly ? 'Text-only assistance' : path || 'Needs project folder before pickup',
+  }
+}
+export function taskProjects(tasks, catalog = []) {
+  if (catalog.length) return catalog.map(project => {
+    const matched=tasks.filter(task=>catalogProject(taskProjectPath(task.projectPath),catalog)?.id===project.id)
+    return { key:project.path, path:project.path, name:project.name, count:matched.length, folders:[...new Set([project.path,...matched.map(task=>taskProjectPath(task.projectPath))])] }
+  })
   const projects = new Map()
   for (const task of tasks) {
     const folder = taskProjectPath(task.projectPath)
-    const key = taskProjectKey(folder)
-    if (!projects.has(key)) projects.set(key, { key, name: taskProjectName(folder), count: 0, folders: new Map() })
-    const project = projects.get(key)
-    project.count++
-    project.folders.set(folder, (project.folders.get(folder) || 0) + 1)
+    if (!projects.has(folder)) projects.set(folder, { key:folder, name:taskProjectName(folder), count:0, path:folder, folders:[folder] })
+    projects.get(folder).count++
   }
-  return [...projects.values()].map(({ folders, ...project }) => {
-    const ranked = [...folders].sort(([pathA, countA], [pathB, countB]) =>
-      Number(!!knownProject(pathB)?.isRoot) - Number(!!knownProject(pathA)?.isRoot) || countB - countA || pathA.localeCompare(pathB))
-    return { ...project, path: ranked[0][0], folders: ranked.map(([path]) => path) }
-  }).sort((a, b) => Number(!a.path) - Number(!b.path) || knownRank(a.key) - knownRank(b.key) || a.name.localeCompare(b.name, 'zh-Hans') || a.path.localeCompare(b.path))
+  const withoutFolder = tasks.filter(task => !taskProjectPath(task.projectPath))
+  if (withoutFolder.some(task => taskProjectDisplay(task).textOnly)) {
+    projects.get('').name = withoutFolder.every(task => taskProjectDisplay(task).textOnly) ? 'Text-only assistance' : 'No project folder'
+  }
+  return [...projects.values()].sort((a,b)=>Number(!a.path)-Number(!b.path) || a.name.localeCompare(b.name) || a.path.localeCompare(b.path))
 }
 
-export function filterBoardTasks(tasks, { projectPath = null, provider = 'all', status = 'all' } = {}) {
-  const projectKey = projectPath === null ? null : taskProjectKey(projectPath)
-  return tasks.filter(task => (status === 'all' || task.status === status) && (projectKey === null || taskProjectKey(task.projectPath) === projectKey) &&
+export function filterBoardTasks(tasks, { projectPath = null, provider = 'all', status = 'all', catalog = [] } = {}) {
+  const projectKey = projectPath === null ? null : taskProjectKey(projectPath,catalog)
+  return tasks.filter(task => (status === 'all' || task.status === status) && (projectKey === null || taskProjectKey(task.projectPath,catalog) === projectKey) &&
     (provider === 'all' || task.provider === provider || provider !== 'any' && task.assignee?.provider === provider))
 }
 
@@ -74,7 +70,8 @@ export function taskWaitSummary(task, { reason = '', autoPickup = true } = {}) {
   const assignedName = typeof assigned === 'string' ? assigned : assigned?.name || assigned?.label
   const agent = assignedName || providerNames[provider] || 'Any agent'
   const own = (wait, next, owner = agent) => ({ owner, wait, next, provider, customOwner: Boolean(assignedName && owner === assignedName) })
-  if (!task.projectPath || /project (?:folder|path).*(?:exist|absolute|folder|opened)|Add a project folder/i.test(full)) return own('Project folder needed', 'Edit request', 'You')
+  const project = taskProjectDisplay(task)
+  if (project.needsProject || !project.textOnly && /project (?:folder|path).*(?:exist|absolute|folder|opened)|Add a project folder/i.test(full)) return own('Project folder needed', 'Edit request', 'You')
   if (provider === 'local-qwen' && /offline|not installed|failed|unavailable/i.test(full)) return own('Agent unavailable', 'Check Ollama and installed model');
   if (/sign.?in|log.?in|authenticat/i.test(full)) return own('Sign-in needed', 'Open agent to continue')
   if (/quota|weekly|below (?:5|20)%/i.test(full)) return own('Waiting for quota', 'Retry after reset')

@@ -4,10 +4,11 @@
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
+import { loadOfficeConfig } from '../server/office-config.mjs';
 import { fileURLToPath } from 'node:url';
 
 const MAX_INPUT = 256 * 1024;
-const commands = new Set(['status', 'pending-questions', 'acknowledge-question', 'answer-question', 'triage-question', 'pending-instructions', 'add-task', 'add-role', 'apply-plan', 'bot-heartbeat', 'claim', 'claim-next', 'heartbeat', 'finish', 'grok-quota']);
+const commands = new Set(['status', 'blocked-tasks', 'handle-blocked-task', 'pending-questions', 'acknowledge-question', 'answer-question', 'triage-question', 'pending-instructions', 'pending-reports', 'acknowledge-report', 'add-task', 'add-role', 'apply-plan', 'bot-heartbeat', 'agent-heartbeat', 'claim', 'claim-next', 'heartbeat', 'finish', 'grok-quota']);
 
 function parseArguments(args, environment) {
   const positional = [];
@@ -26,7 +27,7 @@ function parseArguments(args, environment) {
   if (port) base.port = port;
   const [command = 'status', id] = positional;
   if (!commands.has(command)) throw new Error(`Unknown command. Use ${[...commands].join(', ')}.`);
-  const needsId = ['apply-plan', 'claim', 'heartbeat', 'finish', 'acknowledge-question', 'answer-question', 'triage-question'].includes(command);
+  const needsId = ['handle-blocked-task', 'apply-plan', 'claim', 'heartbeat', 'finish', 'acknowledge-question', 'answer-question', 'triage-question', 'acknowledge-report'].includes(command);
   if (positional.length > (needsId ? 2 : 1) || needsId && (!id || id.length > 240 || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@/-]*$/.test(id))) throw new Error(`${command}${needsId ? ' requires one instruction or task ID.' : ' does not accept positional arguments.'}`);
   return { base: base.origin, command, id };
 }
@@ -60,28 +61,37 @@ export async function runOfficeBoardCommand({ args = process.argv.slice(2), envi
     if (!response.ok) throw new Error(`Office request failed (${response.status}): ${typeof value.error === 'string' ? value.error.slice(0, 240) : 'request rejected'}`);
     return value;
   };
+  if (command === 'blocked-tasks') return request('grok/blocked-tasks');
+  if (command === 'pending-reports') return request('daily-reports/pending');
   const board = await request('board');
   if (command === 'grok-quota') return writeGrokQuota(await readInput(), environment);
   if (command === 'status') { const { csrfToken, ...publicBoard } = board; return publicBoard; }
-  if (command === 'pending-questions') return { workflowVersion: 2, userWorkflowInstruction: '需要你补资料或批准的才交给 Grok 处理，处理不了才转告。所有受阻任务需要我补充或确认的，给我把问题标出来，让我可以在对话框里打字，或者点击什么按键确认或拒绝，也给我加一个重新请求按钮。', handlingPolicy: 'Current office workflow replaces relay-only handling. Grok investigates first using existing records and authorization. For pending questions and delivered info questions not yet triaged, inspect the original task and available records once, without repeating delivered questions. Use triage-question REQUEST_ID with stdin JSON {"source":"grok-bot","questionHash":"CURRENT","outcome":"needs_user","summary":"FINDINGS","evidence":"CHECKS"}. resolved_info may requeue an information-only task; needs_user records what could not be resolved, then relay the specific question. Never invent user replies or approvals. Only acknowledge after actual delivery; answer-question requires the actual user reply.', humanRequests: (Array.isArray(board.humanRequests) ? board.humanRequests : []).filter(item => ['pending', 'delivered'].includes(item.state)) };
+  if (command === 'pending-questions') return { ...(board.grokPatrol?.enabled ? { blockedPatrol: { ...board.grokPatrol, userInstruction: '此办公室已启用 Grok 受阻巡检：按配置周期查看全部受阻任务并处理。每次唤醒同时用 blocked-tasks 读取当前巡检轮次；按当前 allowedActions 和候选负责人回写 handle-blocked-task，不把人审或额度等待当成已解决。无新结果保持静默，只有需要用户资料或批准的问题经现有流程转告。' } } : {}), workflowVersion: 2, userWorkflowInstruction: '需要你补资料或批准的才交给 Grok 处理，处理不了才转告。所有受阻任务需要我补充或确认的，给我把问题标出来，让我可以在对话框里打字，或者点击什么按键确认或拒绝，也给我加一个重新请求按钮。', handlingPolicy: 'Current office workflow replaces relay-only handling. Grok investigates first using existing records and authorization. For pending questions and delivered info questions not yet triaged, inspect the original task and available records once, without repeating delivered questions. Use triage-question REQUEST_ID with stdin JSON {"source":"grok-bot","questionHash":"CURRENT","outcome":"needs_user","summary":"FINDINGS","evidence":"CHECKS"}. resolved_info may requeue an information-only task; needs_user records what could not be resolved, then relay the specific question. Never invent user replies or approvals. Only acknowledge after actual delivery; answer-question requires the actual user reply.', humanRequests: (Array.isArray(board.humanRequests) ? board.humanRequests : []).filter(item => ['pending', 'delivered'].includes(item.state)) };
   if (command === 'pending-instructions') return { instructions: (Array.isArray(board.instructions) ? board.instructions : []).filter(instruction => instruction.status === 'pending') };
   if (typeof board.csrfToken !== 'string' || !board.csrfToken) throw new Error('The local office did not provide a request token.');
   const input = await readInput();
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Standard input must contain a JSON object.');
-  const route = command === 'triage-question' ? `human-requests/${encodeURIComponent(id)}/triage` : command === 'acknowledge-question' ? `human-requests/${encodeURIComponent(id)}/acknowledge` : command === 'answer-question' ? `human-requests/${encodeURIComponent(id)}/answer` : command === 'add-task' ? 'tasks' : command === 'add-role' ? 'roles' : command === 'apply-plan' ? `instructions/${encodeURIComponent(id)}/apply-plan` : command === 'bot-heartbeat' ? 'grok/bot/heartbeat' : command === 'claim-next' ? 'tasks/claim-next' : `tasks/${encodeURIComponent(id)}/${command}`;
+  if (command === 'acknowledge-report' && (input.source !== 'grok-bot' || typeof input.reportHash !== 'string' || !/^[a-f0-9]{64}$/.test(input.reportHash)
+    || typeof input.messageId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:@/-]{0,239}$/.test(input.messageId))) {
+    throw new Error('A report acknowledgement requires source grok-bot, its current reportHash, and the actual delivered messageId.');
+  }
+  const route = command === 'handle-blocked-task' ? `grok/blocked-tasks/${encodeURIComponent(id)}/handle` : command === 'acknowledge-report' ? `daily-reports/${encodeURIComponent(id)}/acknowledge` : command === 'agent-heartbeat' ? 'agents/heartbeat' : command === 'triage-question' ? `human-requests/${encodeURIComponent(id)}/triage` : command === 'acknowledge-question' ? `human-requests/${encodeURIComponent(id)}/acknowledge` : command === 'answer-question' ? `human-requests/${encodeURIComponent(id)}/answer` : command === 'add-task' ? 'tasks' : command === 'add-role' ? 'roles' : command === 'apply-plan' ? `instructions/${encodeURIComponent(id)}/apply-plan` : command === 'bot-heartbeat' ? 'grok/bot/heartbeat' : command === 'claim-next' ? 'tasks/claim-next' : `tasks/${encodeURIComponent(id)}/${command}`;
   const body = ['claim', 'claim-next'].includes(command) && !input.worker ? { worker: input } : input;
   return request(route, body, board.csrfToken);
 }
 
 // Grok Bot's own usage report -> reports/grok-quota.json (read by /api/usage).
 export function writeGrokQuota(input, environment = process.env, now = Date.now()) {
+  const configuration = loadOfficeConfig({ env: environment });
+  if (configuration.mode !== 'enabled' || !configuration.providers['grok-bot']?.enabled) throw new Error('本机配置尚未启用 Grok Bot，不能写入额度。');
   const used = Number(input?.usedPercent), reset = input?.resetsAt == null ? null : typeof input.resetsAt === 'number' ? input.resetsAt : Date.parse(input.resetsAt);
   if (!Number.isFinite(used) || used < 0 || used > 100) throw new Error('usedPercent must be a number from 0 to 100.');
   if (reset !== null && !Number.isFinite(reset)) throw new Error('resetsAt must be an ISO time or epoch ms.');
-  const root = environment.AI_OFFICE_DIR || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const root = environment.AI_OFFICE_DIR || configuration.dataDir;
   const value = { usedPercent: used, resetsAt: reset, plan: typeof input.plan === 'string' ? input.plan.slice(0, 40) : null, note: typeof input.note === 'string' ? input.note.slice(0, 200) : null, observedAt: now };
   fs.mkdirSync(path.join(root, 'reports'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'reports', 'grok-quota.json'), JSON.stringify(value, null, 2) + '\n');
+  fs.writeFileSync(path.join(root, 'reports', 'grok-quota.json'), JSON.stringify(value, null, 2) + '\n', { mode: 0o600 });
+  fs.chmodSync(path.join(root, 'reports', 'grok-quota.json'), 0o600);
   return value;
 }
 

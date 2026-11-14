@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SHARED_DEPARTMENTS, buildSharedRoster, codexOfficeRole, officeAgentLabel, officeRoleLabel, officeRoleDescription, migrateOfficeRecords, officeBridgeAvailable, resolveSharedSelection, workingOfficeAgents } from '../src/unified-office.js';
 
-const worker = (id, status = 'working', extra = {}) => ({ id, sessionId: 'session', name: id, agentType: 'worker', isSubagent: true, observed: true, status, updatedAt: '2026-11-02T00:00:00Z', ...extra });
+const worker = (id, status = 'working', extra = {}) => ({ id, sessionId: 'session', name: id, agentType: 'worker', isSubagent: true, observed: true, status, executionState: status, updatedAt: '2026-11-02T00:00:00Z', ...extra });
 
 test('only actual runtime workers become people and providers cannot collide on identity or seats', () => {
   const states = { claude: { skills: [{ id: 'gamedev:game-ai', name: 'Game AI' }], agents: [worker('same-id')] }, codex: { agents: [worker('same-id')] }, grok: { agents: [worker('same-id')] } };
@@ -108,4 +108,17 @@ test('migration preserves IDs, content and historical positions without inventin
   assert.equal(migrated[1].legacyIndex, 88);
   assert.equal(migrated[2].agentId, null);
   assert.deepEqual(migrateOfficeRecords(migrated), migrated);
+});
+
+test('native execution evidence survives floor projection, keeps recorded workers clickable and excludes unknown idle counts', async () => {
+  const { officeExecutionCounts } = await import('../src/claude-execution.js');
+  const { claudeAgentStatus, claudeWorkerGroups } = await import('../src/claude-office.js');
+  const roster = buildSharedRoster({ claude: { agents: [worker('claude', 'working', { executionState: 'unconfirmed', observationSource: 'claude-lifecycle-hooks', lastEventAt: '2026-11-10T00:00:00Z' })] }, codex: { agents: [worker('codex', 'working', { executionState: 'working' }), worker('detected', 'idle', { observed: false, executionState: 'unconfirmed' })] } });
+  const counts = officeExecutionCounts(roster.flatMap(agent => agent.runtimeAgents));
+  assert.deepEqual(counts, { active: 2, recorded: 1, confirmed: 1, idle: 0, waiting: 0, unconfirmed: 1 });
+  assert.equal(workingOfficeAgents(roster).length, 1);
+  const claude = roster.find(agent => agent.provider === 'Claude Code');
+  assert.equal(claude.runtimeAgents[0].observationSource, 'claude-lifecycle-hooks');
+  assert.match(claudeAgentStatus(claude, 'zh').label, /待确认/);
+  assert.equal(claudeWorkerGroups(roster).unconfirmed.length, 2);
 });

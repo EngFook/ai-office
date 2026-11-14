@@ -76,7 +76,7 @@ test('completion report remains ahead of background circulation', () => {
 });
 
 test('one hundred real workers stay seated and bounded decoration starts within three seconds', () => {
-  const agents = Array.from({ length: 100 }, (_, i) => ({ id: `worker-${i}`, provider: 'Claude Code', liveStatus: 'working', runtimeAgents: [{ status: 'working', observed: true }] }));
+  const agents = Array.from({ length: 100 }, (_, i) => ({ id: `worker-${i}`, provider: 'Claude Code', liveStatus: 'working', runtimeAgents: [{ status: 'working', executionState: 'working', observed: true }] }));
   const busy = createSharedLayout(agents);
   const working = agents.map(agent => ({ id: agent.id, provider: 'claude', agent, desk: busy.placements.get(agent.id) }));
   const movement = createMovement({ lounge: busy.lounge, commons: busy.commons });

@@ -1,3 +1,4 @@
+import { crowdCapacity } from './crowd-capacity.js'
 // V8a prototype renderer (feature flag, default OFF — see figure-vat.js):
 // replaces the 7-batch primitive crowd of People with one skinned Quaternius
 // character per figure, all drawn by a single VAT InstancedMesh (plus the
@@ -6,7 +7,7 @@
 // are byte-for-byte the same semantics as People; only the rendering differs.
 // Loaded lazily from OfficeScene so the GLB and this chunk never download
 // while the flag is off.
-import React, { useEffect, useMemo, useRef } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { useFrame } from '@react-three/fiber'
 import { useGLTF } from '@react-three/drei'
@@ -18,7 +19,7 @@ import { personAppearance, shadowHeightFor, hashIndex } from './person-appearanc
 import { FIGURE_GLB_URL, clipIdForFigure, vatFrameFor } from './figure-vat'
 import { bakeFigureVat, patchFigureMaterial } from './figure-vat-bake'
 
-const PEOPLE_CAP = 160
+
 
 function makeBlobTexture() {
   const size = 64, canvas = document.createElement('canvas'); canvas.width = canvas.height = size
@@ -30,6 +31,8 @@ function makeBlobTexture() {
 }
 
 export default function RealisticPeople({ layout, meeting, huddle, onArrived, onSelectAgent, onSelectProvider, residents = [], ambient = true }) {
+  const [PEOPLE_CAP, setCapacity] = useState(160)
+  const renderedOrder = useRef('')
   const gltf = useGLTF(FIGURE_GLB_URL)
   const baked = useMemo(() => bakeFigureVat(gltf), [gltf])
   const { material, depthMaterial } = useMemo(() => ({
@@ -44,7 +47,7 @@ export default function RealisticPeople({ layout, meeting, huddle, onArrived, on
     attribute.setUsage(THREE.DynamicDrawUsage)
     baked.geometry.setAttribute('aVatFrame', attribute)
     return attribute
-  }, [baked])
+  }, [baked, PEOPLE_CAP])
   useEffect(() => () => { baked.texture.dispose(); baked.geometry.dispose(); material.dispose(); depthMaterial.dispose() }, [baked, material, depthMaterial])
 
   const movement = useMemo(() => createMovement({ lounge: layout.lounge, commons: layout.commons }), [])
@@ -56,12 +59,15 @@ export default function RealisticPeople({ layout, meeting, huddle, onArrived, on
 
   useEffect(() => {
     const working = layout.agents.map(agent => { const desk = sharedSeatForAgent(agent, layout); return desk && { id: agent.id, agent, provider: ({ 'Claude Code': 'claude', Codex: 'codex', Grok: 'grok', Gemini: 'gemini', 'Local Qwen': 'local-qwen' })[agent.provider] || desk.provider, desk } }).filter(Boolean)
-    figuresRef.current = [...residentFigures(residents), ...movement.sync({ working, meeting, huddle, ambient, now: performance.now(), initial: first.current })]
+    movement.sync({ working, meeting, huddle, ambient, now: performance.now(), initial: first.current })
     first.current = false
   }, [layout, meeting, huddle, movement, ambient, residents])
 
   useFrame(({ clock, camera }) => {
     const now = performance.now(), figures = [...residentFigures(residents), ...movement.step(now)]
+    if (figures.length > PEOPLE_CAP) { setCapacity(crowdCapacity(figures.length, PEOPLE_CAP)); return }
+    const order = figures.map(f => f.id).join('|'), forceRefresh = renderedOrder.current !== order
+    renderedOrder.current = order
     figuresRef.current = figures
     const arrived = figures.filter(f => f.agent && !f.walking && !f.queue.length && f.spot?.id?.startsWith('desk:')).map(f => f.id).sort().join('|')
     if (arrived !== arrivedKey.current) { arrivedKey.current = arrived; onArrived?.(new Set(arrived ? arrived.split('|') : [])) }
@@ -72,7 +78,7 @@ export default function RealisticPeople({ layout, meeting, huddle, onArrived, on
     }
     const t = clock.elapsedTime
     figures.slice(0, PEOPLE_CAP).forEach((f, i) => {
-      if (skipDistant) {
+      if (skipDistant && !forceRefresh) {
         projected.set(f.x, 1.2, f.z).project(camera)
         if (Math.abs(projected.x) > .72 || Math.abs(projected.y) > .72) return
       }

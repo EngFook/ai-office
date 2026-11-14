@@ -183,3 +183,27 @@
 .tb-huddle__ownership .tb-card-select { padding:0 0 8px; color:#244233; }
 .tb-huddle__ownership .tb-card-actions { padding:8px 0 0; }
 .task-board .tb-task .tb-card-select { color:#c6ded1; }
+
+.tb-column__paging{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;padding:12px;color:#bfceca;font-size:11px}.tb-column__paging button{border:1px solid #78978a;background:#dcece3;color:#254536;border-radius:7px;padding:8px 10px;cursor:pointer;font:inherit;min-height:36px}.tb-column__paging button:focus-visible{outline:2px solid #aed9bf;outline-offset:3px}.tb-pagination-note{font-size:11px;line-height:1.65;color:#b6cbbb;margin:8px 0 12px}
+
+/* A short task card leads to complete source records in the dialog. */
+.tb-task__open>.tb-resolution>span{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;overflow-wrap:anywhere}
+.tb-task__execution{font-size:10px;line-height:1.5;color:#e6c69d}
+.tb-task-source,.tb-runtime-settings{margin:16px 0;border:1px solid #3b4d58;border-radius:8px;padding:13px;color:#c1d3cb;font-size:12px}
+.tb-task-source>summary,.tb-runtime-settings>summary{cursor:pointer;font-weight:600}
+.tb-runtime-settings>.tb-readiness{margin-top:14px}
+.tb-human-group{margin-top:12px;border-top:1px solid #3b4d58;padding-top:12px;font-size:12px}
+.tb-human-group>summary{cursor:pointer;color:#bbcdd4}
+.tb-human-group>p{font-size:11px;color:#9fb2bc;line-height:1.6}
+.tb-category-tabs button b{font-size:11px;margin-left:7px;opacity:.85}
+.tb-huddle__counts{font-weight:600;color:#354b3b!important}
+.tb-huddle__source{margin-top:8px;font-size:11px;color:#52624f}
+.tb-huddle__source>summary{cursor:pointer}
+.tb-huddle__source>pre{max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.6 ui-monospace,SFMono-Regular,monospace;background:#f2f5ed;padding:10px}
+.tb-kanban--categories>.tb-column{display:block}
+
+.tb-review-badge{display:inline-flex;align-self:flex-start;padding:5px 7px;border:1px solid #9f814b;border-radius:5px;background:#423721;color:#f0d49c;font-size:10px;line-height:1.5}.tb-review-badge.is-approved{border-color:#588567;background:#1e3c2c;color:#bedfc6}.tb-review-badge.is-changes_requested,.tb-review-badge.is-blocked{border-color:#a66e53;background:#492e24;color:#f1c0aa}
+
+.tb-stale-snapshot{padding:11px 13px;border:1px solid #ac824f;border-radius:7px;background:#3b3020;color:#f1d0a3;font-size:12px;line-height:1.6}
+
+.tb-review-badge.is-historical{border-color:#7d8490;background:#2b3440;color:#c8d4e1}

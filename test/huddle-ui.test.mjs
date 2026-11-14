@@ -13,7 +13,8 @@ test('blocked-only requests exclude pending, running and done without changing o
   const tasks = ['pending','running','blocked','done'].flatMap(status => ['claude','codex'].map(provider => ({ id: `${status}:${provider}`, status, provider, projectPath: '/tmp/aio-example' })))
   assert.equal(filterBoardTasks(tasks).length, 8)
   assert.deepEqual(filterBoardTasks(tasks, { status: 'blocked' }).map(t => t.id), ['blocked:claude','blocked:codex'])
-  assert.deepEqual(filterBoardTasks(tasks, { status: 'blocked', provider: 'claude', projectPath: '/tmp/aio-other' }).map(t=>t.id), ['blocked:claude'])
+  assert.deepEqual(filterBoardTasks(tasks, { status: 'blocked', provider: 'claude', projectPath: '/tmp/aio-example' }).map(t=>t.id), ['blocked:claude'])
+  assert.deepEqual(filterBoardTasks(tasks, { status:'blocked', projectPath:'/tmp/aio-other' }), [])
 })
 
 test('Qwen huddle brings idle delegates to board while actual work stays at desks, then releases them', () => {
@@ -88,3 +89,25 @@ test('resolution labels distinguish queued ownership, active investigation and u
   assert.equal(huddleActionLabel('follow_up'), 'Owner follow-up')
   assert.equal(huddleActionLabel('dispatch'), 'Assignment submitted')
 })
+
+test('huddle execution distinguishes queued work, stopped runner, actual execution and diagnosis completion', async () => {
+  const { huddleTaskProgress } = await import('../src/huddle-ui.js');
+  const parent = { id: 'original', status: 'blocked', resolution: { investigationTaskId: 'investigation', nextAction: 'Apply the diagnosed repair.' } };
+  const investigator = { id: 'investigation', status: 'pending' };
+  let result = huddleTaskProgress(parent.id, [parent, investigator], { started: false }, {}, true);
+  assert.equal(result.status, 'pending'); assert.match(result.label, /未开始/); assert.match(result.detail, /执行器已停止/);
+  result = huddleTaskProgress(parent.id, [parent, investigator], { started: true, pending: [{ taskId: investigator.id, reason: 'Project lock is busy.' }] });
+  assert.equal(result.detail, 'Project lock is busy.');
+  result = huddleTaskProgress(parent.id, [parent, { ...investigator, status: 'running' }]);
+  assert.equal(result.status, 'unconfirmed');
+  result = huddleTaskProgress(parent.id, [parent, { ...investigator, status: 'running' }], { started: true, running: [{ taskId: investigator.id, provider: 'codex' }] });
+  assert.equal(result.label, 'Investigation running');
+  result = huddleTaskProgress(parent.id, [parent, { ...investigator, status: 'done' }]);
+  assert.match(result.label, /original task remains/); assert.equal(result.detail, parent.resolution.nextAction);
+  result = huddleTaskProgress('recovery', [{ id: 'recovery', status: 'pending', huddleRetry: { active: true } }], {}, { autoPickup: false });
+  assert.match(result.detail, /pickup is paused/);
+  assert.equal(huddleTaskProgress('missing', []).status, 'missing');
+  assert.equal(huddleTaskProgress(parent.id, [{ ...parent, humanGate: { state: 'denied' } }, { ...investigator, status: 'running' }]).status, 'paused');
+  assert.equal(resolutionStateLabel('user_denied', true), '用户已拒绝 · 保持暂停');
+  assert.equal(resolutionStateLabel('awaiting_capacity'), 'Waiting for quota or capacity');
+});

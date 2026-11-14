@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createTaskStore } from '../server/task-store.mjs';
 import { taskBoardBridge } from '../server/task-board-bridge.mjs';
+import { createAgentPresence } from '../server/agent-presence.mjs';
 
 async function fixture(t, callbacks = {}) {
   const home = await mkdtemp(path.join(tmpdir(), 'office-board-http-'));
@@ -25,6 +26,20 @@ async function fixture(t, callbacks = {}) {
   const tokenHeaders = { 'x-office-token': board.body.csrfToken };
   return { store, request, tokenHeaders, projectPath: path.join(home, 'project') };
 }
+
+test('agent lifecycle transport requires CSRF, enabled provider and writable mode without claiming tasks', async t => {
+  const presence = createAgentPresence();
+  const f = await fixture(t, { enabledProviders: ['gemini'], onAgentHeartbeat: presence.heartbeat });
+  const input = { id: 'child-1', sessionId: 'session-1', parentAgentId: 'root', provider: 'gemini', isSubagent: true, status: 'working' };
+  const endpoint = '/api/office/agents/heartbeat';
+  assert.equal((await f.request(endpoint, { method:'POST', input })).status,403);
+  assert.equal((await f.request(endpoint, { method:'POST', input:{...input,provider:'codex'}, headers:f.tokenHeaders })).status,403);
+  assert.equal((await f.request(endpoint, { method:'POST', input, headers:f.tokenHeaders })).status,200);
+  assert.equal(presence.agents().length,1);
+  assert.equal(f.store.snapshot().tasks.length,0);
+  const paused = await fixture(t, { readOnly:true, onAgentHeartbeat:presence.heartbeat });
+  assert.equal((await paused.request(endpoint, {method:'POST',input,headers:paused.tokenHeaders})).status,403);
+});
 
 test('same-origin loopback plus CSRF token and bounded JSON are required for mutations', async t => {
   const { request, tokenHeaders } = await fixture(t);
@@ -131,4 +146,86 @@ test('bulk card actions require CSRF, preserve per-card failures and validate se
   assert.equal((await request(url, { method: 'POST', headers: tokenHeaders, input: { ...input, items: Array(101).fill(input.items[0]) } })).status, 400);
   const malformed = await request(url, { method: 'POST', headers: tokenHeaders, input: { action: 'deny', items: [null] } });
   assert.equal(malformed.body.results[0].ok, false);
+});
+
+test('dispatch submissions sync through one persisted record and replay without duplicate planning', async t => {
+  let plans = 0;
+  const f = await fixture(t, { onInstruction: () => { plans++; } });
+  const requestId = 'a7d32d00-9a14-407d-9ba1-9423156fa971';
+  const input = { requestId, text: 'UI test: plan work', projectPath: f.projectPath };
+  const first = await f.request('/api/office/instructions', { method: 'POST', input, headers: f.tokenHeaders });
+  assert.equal(first.status, 202);
+  const again = await f.request('/api/office/instructions', { method: 'POST', input, headers: f.tokenHeaders });
+  assert.equal(again.body.instruction.id, first.body.instruction.id);
+  assert.equal(f.store.snapshot().instructions.length, 1);
+  assert.equal(plans, 1);
+  const plan = { summary: 'The requested work is planned', roles: [], tasks: [{ title: 'Implement test work', description: 'Test acceptance', projectPath: f.projectPath, provider: 'claude', role: 'any', priority: 'normal' }] };
+  const result = await f.request(`/api/office/instructions/${requestId}/apply-plan`, { method: 'POST', input: plan, headers: f.tokenHeaders });
+  assert.equal(result.status, 200);
+  const board = (await f.request('/api/office/board')).body;
+  assert.equal(board.instructions[0].summary, plan.summary);
+  assert.equal(board.tasks[0].managementRequestId, requestId);
+  assert.equal(board.tasks[0].status, 'pending');
+  const replayAfterPlan = await f.request('/api/office/instructions', { method: 'POST', input, headers: f.tokenHeaders });
+  assert.equal(replayAfterPlan.body.instruction.status, 'done');
+  assert.equal(plans, 1);
+  assert.equal((await f.request('/api/office/instructions', { method: 'POST', input: { ...input, text: 'Different work' }, headers: f.tokenHeaders })).status, 409);
+  assert.equal((await f.request('/api/office/instructions', { method: 'POST', input: { ...input, requestId: 'invalid' }, headers: f.tokenHeaders })).status, 400);
+});
+
+test('read-only workspace cannot submit dispatch instructions, and a fresh GET sees external plan updates', async t => {
+  const f = await fixture(t, { readOnly: true });
+  assert.equal((await f.request('/api/office/instructions', { method: 'POST', input: { text: 'Cannot write here' }, headers: f.tokenHeaders })).status, 403);
+  assert.equal(f.store.snapshot().instructions.length, 0);
+  const instruction = f.store.createInstruction({ text: 'An external instruction' });
+  f.store.applyManagementPlan(instruction.id, { summary: 'External reply', tasks: [], roles: [] });
+  assert.equal((await f.request('/api/office/board')).body.instructions[0].summary, 'External reply');
+});
+
+
+test('board exposes bounded live report health but keeps generated summaries and source records in reports endpoint', async t => {
+  let report = { phase: 'ready', started: true, runningLogs: [{ detail: 'PRIVATE LOG' }], providers: [],
+    logSummary: { phase: 'summarizing', checkedAt: '2026-11-12T12:00:00Z', generatedAt: null, stale: true,
+      summary: 'PRIVATE MODEL TEXT', highlights: ['PRIVATE HIGHLIGHT'], sourceFingerprint: 'PRIVATE FINGERPRINT',
+      sourceErrors: ['claude', 'PRIVATE ERROR', 'claude'], error: null } };
+  const { request } = await fixture(t, { getWorkReports: () => report });
+  const board = (await request('/api/office/board')).body;
+  assert.deepEqual(board.workReportsSummary.logSummary, { phase: 'summarizing', checkedAt: '2026-11-12T12:00:00.000Z', generatedAt: null, stale: true, error: null, sourceErrors: ['claude'] });
+  assert.ok(!JSON.stringify(board).includes('PRIVATE'));
+  const full = (await request('/api/office/work-reports')).body;
+  assert.equal(full.logSummary.summary, 'PRIVATE MODEL TEXT');
+  assert.equal(full.runningLogs[0].detail, 'PRIVATE LOG');
+  report.logSummary = { phase: 'unavailable', error: 'PRIVATE RAW ERROR', sourceErrors: ['runtime'], checkedAt: 'bad date' };
+  const broken = (await request('/api/office/board')).body.workReportsSummary.logSummary;
+  assert.equal(broken.phase, 'unavailable'); assert.equal(broken.checkedAt, null);
+  assert.ok(broken.error); assert.ok(!JSON.stringify(broken).includes('PRIVATE'));
+  delete report.logSummary;
+  assert.equal((await request('/api/office/board')).body.workReportsSummary.logSummary, undefined, 'legacy report readers remain compatible');
+});
+
+
+test('daily report reads and acknowledgements use the protected Bot route without changing task questions', async t => {
+  const report = { id: 'qwen-daily:2026-11-13', status: 'pending', reportHash: 'a'.repeat(64), text: '日报' };
+  let acknowledgements = 0;
+  const callbacks = { getDailyReports: () => ({ enabled: true, phase: 'waiting', latest: report }), getPendingReports: () => [report],
+    onAcknowledgeReport: (id, input) => { acknowledgements++; assert.equal(id, report.id); assert.equal(input.messageId, 'real-message'); return { ...report, status: 'delivered' }; } };
+  const f = await fixture(t, callbacks), route = `/api/office/daily-reports/${encodeURIComponent(report.id)}/acknowledge`;
+  assert.equal((await f.request('/api/office/daily-reports')).body.latest.id, report.id);
+  assert.deepEqual((await f.request('/api/office/daily-reports/pending')).body.reports, [report]);
+  const input = { source: 'grok-bot', reportHash: report.reportHash, messageId: 'real-message' };
+  assert.equal((await f.request(route, { method: 'POST', input })).status, 403);
+  assert.equal((await f.request(route, { method: 'POST', input, headers: f.tokenHeaders })).body.report.status, 'delivered');
+  assert.equal(acknowledgements, 1); assert.equal(f.store.snapshot().humanRequests.length, 0);
+  const readOnly = await fixture(t, { ...callbacks, readOnly: true });
+  assert.equal((await readOnly.request(route, { method: 'POST', input, headers: readOnly.tokenHeaders })).status, 403);
+  const absent = await fixture(t);
+  assert.equal((await absent.request('/api/office/daily-reports/pending')).status, 503);
+  assert.equal((await absent.request(route, { method: 'POST', input, headers: absent.tokenHeaders })).status, 503);
+});
+
+
+test('report acknowledgement errors preserve bounded HTTP status without treating conflicts as server failures', async t => {
+  const f = await fixture(t, { onAcknowledgeReport() { throw Object.assign(new Error('Report binding does not match.'), { status: 409 }); } });
+  const result = await f.request('/api/office/daily-reports/qwen-daily%3A2026-11-13/acknowledge', { method: 'POST', input: { source: 'grok-bot', reportHash: 'wrong', messageId: 'msg' }, headers: f.tokenHeaders });
+  assert.equal(result.status, 409); assert.match(result.body.error, /binding/);
 });

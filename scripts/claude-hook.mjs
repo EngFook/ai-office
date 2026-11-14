@@ -24,7 +24,8 @@ function cleanCwd(value) {
 // executable is verifiably Claude, never the observer's short-lived parent PID.
 // No command arguments or environment values are inspected or persisted.
 function claudeAncestorPid() {
-  if (process.platform === 'win32') return undefined;
+  // Test runs disable the lookup so a surrounding Claude session is never recorded.
+  if (process.platform === 'win32' || process.env.AI_OFFICE_HOOK_ANCESTOR_LOOKUP === 'off') return undefined;
   let current = process.ppid;
   for (let depth = 0; depth < 8 && current > 1; depth++) {
     let line;
@@ -74,6 +75,7 @@ async function main() {
     sessionId,
     agentId: identifier(raw.agent_id),
     agentType: identifier(raw.agent_type),
+    parentAgentId: identifier(raw.parent_agent_id),
     cwd: cleanCwd(raw.cwd),
     tool,
     skill: tool === 'Skill' ? identifier(raw.tool_input?.skill) : undefined,
