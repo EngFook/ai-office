@@ -1,4 +1,4 @@
-import { GROK_COMMUNICATION_POLICY } from './communication-policy.mjs';
+import { OFFICE_AGENT_POLICY } from './agent-policy.mjs';
 import { mkdir, readFile, writeFile, rename, lstat, chmod, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -111,7 +111,7 @@ export function createGrokManagement({store,home=process.env.AI_OFFICE_HOME || p
     try{
       const roles=store.snapshot().roles.map(role=>({name:role.name,description:role.description}));
       const body={model:credentials.model,store:false,max_output_tokens:8000,input:[
-        {role:'system',content:GROK_COMMUNICATION_POLICY+'\n\nYou are the Grok management team for a local AI office. Follow the user instruction by defining useful management roles and turning the request into concrete, bounded implementation tasks for Claude Code or Codex. Use grok-bot only for tasks assigned to the external Grok Bot app; those cards wait for that bot to claim and execute them through the local office CLI/API, and the office runner never executes them. You are planning work, not executing it. Never claim implementation is complete. Do not create redundant tasks. Existing roles are context; only return new or updated roles. Return no more than 20 roles and 40 tasks. Use concise titles, clear acceptance criteria in descriptions, sensible priority, and the specified role/provider enums. If the request only creates roles, return an empty tasks list. Do not invent repository paths, credentials, capabilities or completed work. No tools or outside data are available.'},
+        {role:'system',content:OFFICE_AGENT_POLICY+'\n\nYou are the Grok management team for a local AI office. Follow the user instruction by defining useful management roles and turning the request into concrete, bounded implementation tasks for Claude Code or Codex. Use grok-bot only for tasks assigned to the external Grok Bot app; those cards wait for that bot to claim and execute them through the local office CLI/API, and the office runner never executes them. You are planning work, not executing it. Never claim implementation is complete. Do not create redundant tasks. Existing roles are context; only return new or updated roles. Return no more than 20 roles and 40 tasks. Use concise titles, clear acceptance criteria in descriptions, sensible priority, and the specified role/provider enums. If the request only creates roles, return an empty tasks list. Do not invent repository paths, credentials, capabilities or completed work. No tools or outside data are available.'},
         {role:'user',content:JSON.stringify({instruction:instruction.text,projectPath:instruction.projectPath||null,existingRoles:roles})},
       ],text:{format:{type:'json_schema',name:'office_management_plan',strict:true,schema:MANAGEMENT_SCHEMA}}};
       const response=await request('/responses',credentials.apiKey,body,controller.signal);

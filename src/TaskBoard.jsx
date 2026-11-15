@@ -508,7 +508,7 @@ export function TaskProjects({ board, onOpenAgent, onAddProject }) {
     <TaskBoard key={projectPath} board={board} initialProjectPath={projectPath} onOpenAgent={onOpenAgent}/>
   </div>
   return <section className="tb-projects" aria-label="Project task boards">
-    <h2>Project task boards</h2><p>Choose a project to see its requests.</p>
+    <h2>Project task boards</h2><p data-no-i18n>{zh ? '这里只显示你登记的项目。未登记目录和纯文字请求仍保留在任务页。' : 'Only projects you register appear here. Requests in other folders and text-only requests remain on the task board.'}</p>
     <ErrorNotice error={board?.error} onRetry={() => board?.refresh()}/>
     {board?.loading && !projects.length ? <p role="status">Loading the task board…</p> : projects.length ? <div className="tb-project-grid">{projects.map(project => <button type="button" className="tb-project-card" key={project.key} title={project.folders.length > 1 ? project.folders.join('\n') : undefined} onClick={() => setProjectPath(project.path)}>
       <Folder size={20}/><strong data-no-i18n={!!project.path || undefined}>{project.name}</strong><span className="tb-project-card__count">{project.count}</span>

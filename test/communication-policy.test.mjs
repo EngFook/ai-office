@@ -4,11 +4,14 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { GROK_COMMUNICATION_POLICY } from '../server/communication-policy.mjs';
+import { OFFICE_PROJECT_POLICY } from '../server/agent-policy.mjs';
 import { taskPrompt } from '../server/task-runner.mjs';
-import { createLocalQwen } from '../server/local-qwen.mjs';
+import { createLocalQwen, storySystemPrompt } from '../server/local-qwen.mjs';
 import { createGrokWake } from '../server/grok-wake.mjs';
 import { createGrokManagement } from '../server/grok-management.mjs';
 import { createTaskStore } from '../server/task-store.mjs';
+import { readProjectCatalog } from '../server/project-catalog.mjs';
+import { runOfficeBoardCommand } from '../scripts/office-board.mjs';
 
 function assertPolicy(prompt) {
   assert.match(prompt, /must never type, paste, or send messages to Grok Bot chat/);
@@ -17,6 +20,13 @@ function assertPolicy(prompt) {
   assert.match(prompt, /only through the office pending-questions queue and its configured webhook wake/);
   assert.match(prompt, /do not fall back to chat/);
   assert.match(prompt, /own bot identity, never impersonating the user/);
+}
+
+function assertProjectPolicy(prompt) {
+  assert.ok(prompt.includes(OFFICE_PROJECT_POLICY));
+  assert.match(prompt, /unless the user explicitly authorizes that exact catalog change/);
+  assert.match(prompt, /worktrees already authorized for the assigned task without registering them as Office projects/);
+  assert.match(prompt, /pass this rule to delegated agents/);
 }
 
 async function temporaryHome(t) {
@@ -31,6 +41,8 @@ test('all coding, review, research and recovery workers receive the user-only ch
     for (const kind of ['task', 'review', 'research', 'resolution']) {
       const prompt = taskPrompt({ ...base, provider, kind, huddleRetry: { active: true, previousError: 'Interrupted', previousResult: '' } });
       assertPolicy(prompt);
+      assertProjectPolicy(prompt);
+      assert.ok(prompt.indexOf(OFFICE_PROJECT_POLICY) < prompt.indexOf(base.description));
       assert.ok(prompt.indexOf('Only the user controls that chat.') < prompt.indexOf(base.description));
     }
   }
@@ -48,6 +60,7 @@ test('Qwen support and blocked-task discussion carry the rule in the system mess
   for (const body of requests) {
     assert.equal(body.messages[0].role, 'system');
     assertPolicy(body.messages[0].content);
+    assertProjectPolicy(body.messages[0].content);
     assert.equal(body.tools, undefined);
   }
 });
@@ -67,6 +80,7 @@ test('optional Grok planning receives the same rule without launching chat autom
   assert.equal(requests.length, 1);
   assert.equal(requests[0].input[0].role, 'system');
   assertPolicy(requests[0].input[0].content);
+  assertProjectPolicy(requests[0].input[0].content);
 });
 
 test('webhook instructs bot identity and queue lookup; failure leaves delivery unacknowledged', async t => {
@@ -81,10 +95,39 @@ test('webhook instructs bot identity and queue lookup; failure leaves delivery u
   assert.equal(calls.length, 1, 'failed webhook never attempts a chat fallback');
   const body = JSON.parse(calls[0].init.body);
   assertPolicy(body.message);
+  assertProjectPolicy(body.message);
   assert.match(body.message, /MUST run office-board.mjs pending-questions/);
   assert.match(body.message, /not approval/);
   assert.equal(question.state, 'pending');
   assert.ok(wake.status().error);
+});
+
+test('story research, story writing and local reporting preserve explicit project ownership', async t => {
+  for (const stage of ['research', 'story_review']) {
+    const description = JSON.stringify({ officeWorkflow: 'story-studio-v1', projectId: 'fixture', stage, goal: 'Improve a scene', canon: 'Existing facts', draft: 'A draft', researchBrief: 'Ideas' });
+    assertProjectPolicy(taskPrompt({ provider: 'gemini', kind: 'research', description }));
+  }
+  assertProjectPolicy(storySystemPrompt('Configured project'));
+  const home = await temporaryHome(t), requests = [];
+  const client = createLocalQwen({ usageFile: path.join(home, 'usage.json'), fetchImpl: async (_url, init) => {
+    requests.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({ done: true, message: { content: '{"entries":[],"summary":"Fixture summary","highlights":[]}' } }));
+  } });
+  await client.extractWorkReport('Supplied task excerpt');
+  await client.summarizeRunningLogs('Supplied log facts');
+  await client.summarizeDailyReport('Supplied daily facts');
+  assert.equal(requests.length, 3);
+  for (const body of requests) assertProjectPolicy(body.messages[0].content);
+});
+
+test('worker CLI offers no project registration and ordinary task creation leaves the catalog untouched', async t => {
+  for (const command of ['add-project', 'create-project', 'register-project']) {
+    await assert.rejects(runOfficeBoardCommand({ args: [command], environment: {}, fetchImpl: () => { assert.fail('Unknown worker commands must never call the API'); } }), /Unknown command/);
+  }
+  const home = await temporaryHome(t), store = createTaskStore({ home });
+  t.after(() => store.close());
+  store.createTask({ title: 'An explicitly assigned task folder', projectPath: home, provider: 'codex' });
+  assert.deepEqual(readProjectCatalog(home), []);
 });
 
 

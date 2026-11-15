@@ -36,20 +36,24 @@ test('provider draft choices reflect explicit configuration without hiding an ex
   assert.equal(requestProviderOptions(state({ runtime: { providers: { 'local-qwen': { disabled: true } } } })).find(option => option.id === 'local-qwen').disabled, true);
 });
 
-test('catalog grouping preserves all cards, including unregistered and text-only tasks', () => {
+test('catalog grouping only creates registered project cards while every task stays accessible', () => {
   const catalog = [{ id: 'a', name: 'A', path: '/work/A', folders: ['/tmp/A-worktree'] }];
   const tasks = [{ id: 'a', projectPath: '/work/A' }, { id: 'tree', projectPath: '/tmp/A-worktree/src' }, { id: 'b', projectPath: '/work/B' }, { id: 'text', provider: 'local-qwen', supportType: 'log-triage', role: 'Helper', description: 'actual supplied output', projectPath: '' }];
   const projects = taskProjects(tasks, catalog);
-  assert.equal(projects.reduce((sum, project) => sum + project.count, 0), tasks.length);
+  assert.equal(projects.length, 1);
+  assert.equal(projects[0].count, 2);
   assert.deepEqual(filterBoardTasks(tasks, { projectPath: '/work/A', catalog }).map(task => task.id), ['a', 'tree']);
-  assert.equal(projects.find(project => !project.path).name, 'Text-only assistance');
+  assert.deepEqual(filterBoardTasks(tasks, { catalog }), tasks);
+  assert.deepEqual(filterBoardTasks(tasks, { projectPath: '/work/B', catalog }).map(task => task.id), ['b']);
+  assert.deepEqual(filterBoardTasks(tasks, { projectPath: '', catalog }).map(task => task.id), ['text']);
   assert.equal(taskProjects([], catalog)[0].count, 0);
 });
 
 test('research is grouped by its selected project while the isolated execution folder stays unchanged', () => {
   const task = { id: 'research', provider: 'gemini', projectPath: '/private/office/research', contextProjectPath: '/work/Selected', status: 'pending' };
   const before = structuredClone(task);
-  assert.equal(taskProjects([task])[0].path, '/work/Selected');
+  assert.deepEqual(taskProjects([task]), []);
+  assert.equal(taskProjects([task], [{ path: '/work/Selected', name: 'Selected' }])[0].path, '/work/Selected');
   assert.equal(taskProjectDisplay(task).detail, '/work/Selected');
   assert.equal(filterBoardTasks([task], { projectPath: '/work/Selected' }).length, 1);
   assert.equal(filterBoardTasks([task], { projectPath: '/private/office/research' }).length, 0);
@@ -91,6 +95,23 @@ test('empty project list has a real add-project action only when permitted', () 
   assert.match(html, />Add project</);
   const readOnly = render(ui.TaskProjects, { board: { state: state({ capabilities: { projects: false } }) }, onAddProject() {} });
   assert.doesNotMatch(readOnly, />Add project</);
+});
+
+test('project page shows exactly the registered projects despite five extra task worktrees', () => {
+  const projectCatalog = [{ id: 'a', path: '/work/A', name: 'Registered A' }, { id: 'b', path: '/work/B', name: 'Registered B' }];
+  const tasks = Array.from({ length: 5 }, (_, index) => ({ id: `extra-${index}`, projectPath: `/tmp/Unregistered-${index}`, title: `Existing task ${index}` }));
+  tasks.push({ id: 'text', provider: 'local-qwen', projectPath: '', description: 'Supplied text' });
+  const html = render(ui.TaskProjects, { board: { state: state({ projectCatalog, tasks }), loading: false }, onAddProject() {} });
+  assert.equal((html.match(/class="tb-project-card"/g) || []).length, 2);
+  assert.match(html, /Registered A/); assert.match(html, /Registered B/);
+  assert.doesNotMatch(html, /Unregistered-/);
+  assert.equal(filterBoardTasks(tasks).length, 6);
+  for (const emptyCatalog of [[], undefined]) {
+    const empty = render(ui.TaskProjects, { board: { state: state({ projectCatalog: emptyCatalog, tasks }), loading: false }, onAddProject() {} });
+    assert.match(empty, /No projects yet/);
+    assert.match(empty, />Add project</);
+    assert.doesNotMatch(empty, /class="tb-project-card"/);
+  }
 });
 
 test('project form tells remote users which computer owns the directory and does not start tasks', () => {

@@ -168,7 +168,7 @@ function App() {
         <button aria-current={view==='office'?'page':undefined} className={view==='office'?'active':''} onClick={()=>navigate('office')}><LayoutDashboard size={17}/> Studio</button>
         <button aria-current={view==='tasks'?'page':undefined} className={view==='tasks'?'active':''} onClick={()=>navigate('tasks')}><ClipboardList size={17}/> Tasks <span className="nav-count">{board.stale ? '—' : openTaskCount}</span></button>
         <button aria-current={view==='management'?'page':undefined} className={view==='management'?'active':''} onClick={()=>navigate('management')}><UsersRound size={17}/> Dispatch</button>
-        <button aria-current={view==='projects'?'page':undefined} className={view==='projects'?'active':''} onClick={()=>navigate('projects')}><BriefcaseBusiness size={17}/> Projects <span className="nav-count">{taskProjects(board.state.tasks,board.state.projectCatalog || []).filter(project=>project.path).length}</span></button>
+        <button aria-current={view==='projects'?'page':undefined} className={view==='projects'?'active':''} onClick={()=>navigate('projects')}><BriefcaseBusiness size={17}/> Projects <span className="nav-count">{taskProjects(board.state.tasks,board.state.projectCatalog || []).length}</span></button>
         <button aria-current={view==='reports'?'page':undefined} className={view==='reports'?'active':''} onClick={()=>navigate('reports')}><ClipboardList size={17}/> Reports <span className="nav-count">{reports.length + workReportCount}</span></button>
       </nav>
       <div className="side-divider"/>

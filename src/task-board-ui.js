@@ -2,8 +2,8 @@ import { localQwenTaskError } from '../server/local-qwen-policy.mjs'
 
 const providerNames = { claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini', grok: 'Grok', 'grok-bot': 'Grok Bot', 'local-qwen': 'Local Qwen' }
 
-// Without an owner catalog, folders remain independent. An explicit catalog
-// groups approved aliases for display only; execution paths stay unchanged.
+// Project identity comes only from the owner's catalog. Folder helpers keep
+// individual requests accessible without registering their execution paths.
 export function taskProjectPath(path) {
   const value = String(path || '').trim()
   const normalized = /^(?:[a-z]:[\\/]|\\\\)/i.test(value) ? value.replace(/\\/g, '/') : value
@@ -30,27 +30,24 @@ export function taskProjectDisplay(task = {}) {
 }
 export function taskProjects(tasks = [], catalog = []) {
   const projects = new Map()
-  // Registered projects are visible even before their first task. Keep other
-  // task folders accessible too: a catalog is a grouping, not a visibility gate.
-  for (const project of catalog) {
+  const registeredProjects = Array.isArray(catalog) ? catalog : []
+  // Only an explicit registration creates a project card or navigation count.
+  // Unknown worktrees and folderless tasks remain on the task board.
+  for (const project of registeredProjects) {
     const folder = taskProjectPath(project.path)
     if (!folder || projects.has(folder)) continue
     projects.set(folder, { key: folder, path: folder, name: project.name || taskProjectName(folder), count: 0, folders: [...new Set([folder, ...(project.folders || []).map(taskProjectPath).filter(Boolean)])] })
   }
   for (const task of tasks) {
     const folder = taskProjectPath(task.contextProjectPath || task.projectPath)
-    const registered = catalogProject(folder, catalog)
-    const key = registered ? taskProjectPath(registered.path) : folder
-    if (!projects.has(key)) projects.set(key, { key, name: taskProjectName(folder), count: 0, path: folder, folders: [folder] })
-    const project = projects.get(key)
+    const registered = catalogProject(folder, registeredProjects)
+    if (!registered) continue
+    const project = projects.get(taskProjectPath(registered.path))
+    if (!project) continue
     project.count++
     if (!project.folders.includes(folder)) project.folders.push(folder)
   }
-  const withoutFolder = tasks.filter(task => !taskProjectPath(task.contextProjectPath || task.projectPath))
-  if (withoutFolder.some(task => taskProjectDisplay(task).textOnly)) {
-    projects.get('').name = withoutFolder.every(task => taskProjectDisplay(task).textOnly) ? 'Text-only assistance' : 'No project folder'
-  }
-  return [...projects.values()].sort((a,b)=>Number(!a.path)-Number(!b.path) || a.name.localeCompare(b.name) || a.path.localeCompare(b.path))
+  return [...projects.values()].sort((a,b)=>a.name.localeCompare(b.name) || a.path.localeCompare(b.path))
 }
 
 export function filterBoardTasks(tasks, { projectPath = null, provider = 'all', status = 'all', catalog = [] } = {}) {

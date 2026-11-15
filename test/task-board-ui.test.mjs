@@ -2,18 +2,19 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { filterBoardTasks, taskAgentProvider, taskProjectDisplay, taskProjectKey, taskProjectName, taskProjectPath, taskProjects, taskWaitSummary } from '../src/task-board-ui.js'
 
-test('projects use full folder identity without merging similarly named checkouts', () => {
+test('registered projects use full folder identity without merging similarly named checkouts', () => {
   const tasks = [
     {projectPath:'/work/Studio'}, {projectPath:'/work/Studio/'},
     {projectPath:'/other/Studio'}, {projectPath:'/work/Studio-feature'},
     {projectPath:'/work/Studio/reports'}, {projectPath:''}, {},
   ]
   const before=JSON.stringify(tasks)
-  const projects=taskProjects(tasks)
-  assert.equal(projects.length,5)
+  const catalog=['/work/Studio','/other/Studio','/work/Studio-feature','/work/Studio/reports'].map(path=>({path}))
+  const projects=taskProjects(tasks,catalog)
+  assert.equal(projects.length,4)
   assert.deepEqual(projects.find(project=>project.path==='/work/Studio'),{key:'/work/Studio',name:'Studio',count:2,path:'/work/Studio',folders:['/work/Studio']})
   assert.equal(projects.filter(project=>project.name==='Studio').length,2)
-  assert.deepEqual(projects.at(-1),{key:'',name:'Needs project folder',count:2,path:'',folders:['']})
+  assert.equal(projects.some(project=>!project.path),false)
   assert.equal(taskProjectName('/work/Studio/reports'),'reports')
   assert.equal(taskProjectName('/work/constructor'),'constructor')
   assert.equal(taskProjectName('/work/__proto__'),'__proto__')
@@ -22,6 +23,10 @@ test('projects use full folder identity without merging similarly named checkout
   assert.equal(taskProjectPath('/'),'/')
   assert.equal(taskProjectPath('  '),'')
   assert.deepEqual(taskProjects([]),[])
+  assert.deepEqual(taskProjects(tasks),[])
+  assert.deepEqual(taskProjects(tasks,[]),[])
+  assert.deepEqual(taskProjects(tasks,null),[])
+  assert.equal(filterBoardTasks(tasks).length,tasks.length)
   assert.equal(JSON.stringify(tasks),before)
 })
 
@@ -71,11 +76,13 @@ test('blocked requests preserve full task data and identify assigned agents befo
   assert.equal(taskAgentProvider({ provider: 'any', assignee: 'gemini-research-2' }), 'gemini')
 })
 
-test('explicit project catalog groups declared worktrees without hiding other task folders',()=>{
+test('explicit project catalog counts only registered projects and keeps other requests on the task board',()=>{
  const catalog=[{id:'game',name:'Game',path:'/work/game',folders:['/tmp/game-lane']},{id:'office',name:'Office',path:'/work/office',folders:['/tmp/office-review']}];
  const tasks=[{id:'main',projectPath:'/work/game',status:'pending'},{id:'lane',projectPath:'/tmp/game-lane/reports',status:'blocked'},{id:'office',projectPath:'/tmp/office-review',status:'pending'},{id:'unknown',projectPath:'/unrelated',status:'done'},{id:'prefix',projectPath:'/tmp/game-lane-other',status:'done'}];
  const before=JSON.stringify(tasks);
- const projects=taskProjects(tasks,catalog);assert.equal(projects.length,4);assert.equal(projects.find(p=>p.path==='/work/game').count,2);assert.equal(projects.find(p=>p.path==='/work/office').count,1);assert.ok(projects.some(p=>p.path==='/unrelated'));assert.ok(projects.some(p=>p.path==='/tmp/game-lane-other'));
+ const projects=taskProjects(tasks,catalog);assert.equal(projects.length,2);assert.equal(projects.find(p=>p.path==='/work/game').count,2);assert.equal(projects.find(p=>p.path==='/work/office').count,1);assert.ok(!projects.some(p=>p.path==='/unrelated'));assert.ok(!projects.some(p=>p.path==='/tmp/game-lane-other'));
+ assert.deepEqual(filterBoardTasks(tasks,{catalog}).map(t=>t.id),tasks.map(t=>t.id));
+ assert.deepEqual(filterBoardTasks(tasks,{catalog,projectPath:'/unrelated'}).map(t=>t.id),['unknown']);
  assert.deepEqual(filterBoardTasks(tasks,{projectPath:'/work/game',catalog}).map(t=>t.id),['main','lane']);
  assert.deepEqual(filterBoardTasks(tasks,{projectPath:'/work/game',catalog,status:'blocked'}).map(t=>t.id),['lane']);
  assert.equal(JSON.stringify(tasks),before);
@@ -106,10 +113,10 @@ test('missing-folder coding and invalid Qwen requests retain actionable warnings
   assert.equal(taskWaitSummary({ ...textOnlyQwen, projectPath: '/missing' }, { reason: 'The project folder does not exist' }).wait, 'Project folder needed')
 })
 
-test('folderless text assistance groups stay selectable without a misleading missing-folder label', () => {
+test('folderless text assistance stays accessible without creating a project', () => {
   const textTasks = [{ ...textOnlyQwen, id: 'qwen', status: 'done' }]
-  assert.equal(taskProjects(textTasks)[0].name, 'Text-only assistance')
+  assert.deepEqual(taskProjects(textTasks), [])
   const mixed = [...textTasks, { id: 'coding', provider: 'codex', projectPath: '' }]
-  assert.equal(taskProjects(mixed)[0].name, 'No project folder')
+  assert.deepEqual(taskProjects(mixed), [])
   assert.deepEqual(filterBoardTasks(mixed, { projectPath: '' }).map(task => task.id), ['qwen', 'coding'])
 })
