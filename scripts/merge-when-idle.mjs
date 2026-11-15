@@ -7,6 +7,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, openSync, closeSync, existsSync, realpathSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { loadOfficeConfig } from '../server/office-config.mjs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +16,12 @@ import { createWorkReportFile, validateWorkExtract, WORK_REPORT_PROVIDERS } from
 const MINUTE = 60000;
 const PROTOCOL = 1;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Backups and idle-merge logs: AI_OFFICE_BACKUP_DIR, else <office data dir>/backups.
+export function defaultBackupRoot(env = process.env, home = homedir()) {
+  if (env.AI_OFFICE_BACKUP_DIR) return path.resolve(env.AI_OFFICE_BACKUP_DIR);
+  return path.join(loadOfficeConfig({ env, home }).dataDir, 'backups');
+}
 
 export function runningCount(board) {
   if (!Array.isArray(board?.tasks) || !Array.isArray(board?.runtime?.running) || board.runtime.available === false) throw new Error('task/runtime status is unavailable');
@@ -88,7 +95,7 @@ export async function validateReportReadiness(report, root, sourceTasks) {
 }
 
 export function createDeployer({ root, branch, checks = [], base = 'http://127.0.0.1:5173', log = () => {}, env = process.env,
-  fetchImpl = fetch, sleep = delay, backupRoot = path.join(homedir(), 'Developer', 'aio-backups'),
+  fetchImpl = fetch, sleep = delay, backupRoot = defaultBackupRoot(env),
   verifyLive, timing = {} }) {
   root = realpathSync(root);
   const url = new URL(base);
@@ -226,7 +233,7 @@ export function createDeployer({ root, branch, checks = [], base = 'http://127.0
 async function main() {
   const { command, branch, checks } = parseArgs(process.argv.slice(2));
   const root = realpathSync(process.env.AI_OFFICE_LIVE || path.join(path.dirname(fileURLToPath(import.meta.url)), '..'));
-  const logDir = path.join(homedir(), 'Developer', 'aio-backups');
+  const logDir = defaultBackupRoot();
   mkdirSync(logDir, { recursive: true, mode: 0o700 });
   const logFile = path.join(logDir, `idle-merge-${branch.replace(/[^A-Za-z0-9._-]/g, '_')}.log`);
   if (command === 'start') {

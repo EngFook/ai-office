@@ -64,16 +64,18 @@ export async function setupOffice(argv = process.argv.slice(2), { env = process.
   if (importPath) {
     try { source = JSON.parse(readFileSync(importPath, 'utf8')); } catch { throw new Error('无法读取导入配置，请检查 JSON 格式与文件权限。'); }
   }
+  const setupPath = value => value === '~' ? path.resolve(home) : path.resolve(cwd, value.startsWith('~/') ? path.join(home, value.slice(2)) : value);
+  const setupCommand = value => value === '~' || /[/\\]/.test(value) ? setupPath(value) : value;
   const config = validateOfficeConfig(source, { home, cwd, baseDir: importPath ? path.dirname(importPath) : path.dirname(configPath) });
   // Respect the existing data directory environment setting without migrating any data.
-  if (env.AI_OFFICE_HOME && !flags['data-dir']) config.dataDir = path.resolve(cwd, env.AI_OFFICE_HOME.startsWith('~/') && home ? path.join(home, env.AI_OFFICE_HOME.slice(2)) : env.AI_OFFICE_HOME);
+  if (env.AI_OFFICE_HOME && !flags['data-dir']) config.dataDir = setupPath(env.AI_OFFICE_HOME);
   const fields = { 'data-dir': 'dataDir', workspace: 'workspace', title: 'title', 'time-zone': 'timeZone', mode: 'mode' };
-  for (const [flag, field] of Object.entries(fields)) if (flags[flag]) config[field] = ['dataDir', 'workspace'].includes(field) && !flags[flag].startsWith('~') ? path.resolve(cwd, flags[flag]) : flags[flag];
+  for (const [flag, field] of Object.entries(fields)) if (flags[flag]) config[field] = ['dataDir', 'workspace'].includes(field) ? setupPath(flags[flag]) : flags[flag];
   for (const id of enable) config.providers[id].enabled = true;
   for (const id of disable) config.providers[id].enabled = false;
   for (const [field, id, value] of assignments) {
     if (field === 'reviewer') config.reviewerFor[id] = value;
-    else config.providers[id][field] = field === 'concurrency' ? Number(value) : value;
+    else config.providers[id][field] = field === 'concurrency' ? Number(value) : field === 'command' ? setupCommand(value) : value;
     if (field === 'model' && id === 'local-qwen') config.ollama.model = value;
   }
   if (flags['ollama-url']) config.ollama.url = flags['ollama-url'];
@@ -84,13 +86,13 @@ export async function setupOffice(argv = process.argv.slice(2), { env = process.
     const ask = async (label, value, en = label) => (await rl.question(`${english ? en : label} [${value}]: `)).trim() || value;
     try {
       config.title = await ask('办公室名称', config.title, 'Office name');
-      config.workspace = await ask('默认工作目录', config.workspace, 'Existing project folder');
-      config.dataDir = await ask('本机数据目录', config.dataDir, 'Private data directory');
+      config.workspace = setupPath(await ask('默认工作目录', config.workspace, 'Existing project folder'));
+      config.dataDir = setupPath(await ask('本机数据目录', config.dataDir, 'Private data directory'));
       config.timeZone = await ask('时区', config.timeZone, 'Time zone');
       for (const id of PROVIDER_IDS) {
         config.providers[id].enabled = /^y(es)?$/i.test(await ask(`启用 ${id}？输入 yes 或 no`, config.providers[id].enabled ? 'yes' : 'no', `Enable ${id}? yes or no`));
         if (config.providers[id].enabled) {
-          if (['claude', 'codex', 'gemini'].includes(id)) config.providers[id].command = await ask(`${id} CLI 命令或路径`, config.providers[id].command, `${id} CLI executable or path`);
+          if (['claude', 'codex', 'gemini'].includes(id)) config.providers[id].command = setupCommand(await ask(`${id} CLI 命令或路径`, config.providers[id].command, `${id} CLI executable or path`));
           if (['claude', 'codex', 'gemini'].includes(id)) {
             config.providers[id].model = await ask(`${id} 模型（留空使用 CLI 默认）`, config.providers[id].model, `${id} model (blank uses CLI default)`);
             config.providers[id].concurrency = Number(await ask(`${id} 最大并发数`, String(config.providers[id].concurrency), `${id} maximum concurrent workers`));

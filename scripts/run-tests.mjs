@@ -11,9 +11,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const home = mkdtempSync(path.join(tmpdir(), 'ai-office-test-home-'));
 const requested = process.argv.slice(2);
 const files = requested.length ? requested : readdirSync(path.join(root, 'test')).filter(name => name.endsWith('.test.mjs')).sort().map(name => path.join('test', name));
-const env = { ...process.env, AI_OFFICE_HOME: home, AI_OFFICE_HOOK_ANCESTOR_LOOKUP: 'off' };
-// Install-specific overrides from the caller's shell must not leak into tests.
-for (const key of ['AI_OFFICE_QWEN_WATCH_PREREQUISITES', 'AI_OFFICE_WORK_REPORT_PREREQUISITES']) delete env[key];
+// Install-specific overrides from the caller's shell (AI_OFFICE_CONFIG, AI_OFFICE_TIMEZONE,
+// AI_OFFICE_URL, prerequisite IDs, ...) must not leak into tests or point them at the real office.
+const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('AI_OFFICE_')));
+Object.assign(env, { AI_OFFICE_HOME: home, AI_OFFICE_HOOK_ANCESTOR_LOOKUP: 'off' });
 const child = spawn(process.execPath, ['--test', ...files], { cwd: root, env, stdio: 'inherit' });
 const cleanup = () => { try { rmSync(home, { recursive: true, force: true }); } catch {} };
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));

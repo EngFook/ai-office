@@ -10,6 +10,7 @@ export function humanRequestFingerprint(task) {
   const legacy = [task.id, task.title, task.description, task.provider, task.projectPath,
     task.kind, task.role, task.reviewOf, task.supportType, task.priority,
     task.error || '', task.result || '', task.humanRevision || 0, task.humanEpisode || 0];
+  if (task.contextProjectPath) legacy.push({ contextProjectPath: task.contextProjectPath });
   return digest(task.approvalAction == null ? legacy : [...legacy, { approvalAction: task.approvalAction }]);
 }
 export function humanRequestSpec(task) {

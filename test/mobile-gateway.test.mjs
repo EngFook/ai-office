@@ -91,3 +91,15 @@ test('phone cannot impersonate a worker or Grok relay, or change credentials', a
  }
  assert.equal(f.calls.length,0);
 });
+
+
+test('paired mobile clients can inspect both native workspaces without gaining write access', async t => {
+ const f = await fixture(t), cookie = await f.session();
+ for (const provider of ['claude', 'codex']) {
+  const route = `/api/${provider}/workspace?status=running&limit=20`;
+  assert.equal((await fetch(f.base + route)).status, 401);
+  assert.equal((await fetch(f.base + route, { headers: { Cookie: cookie } })).status, 200);
+  assert.equal(f.calls.at(-1).path, route);
+  assert.equal((await fetch(f.base + route, { method: 'POST', headers: { Cookie: cookie, Origin: f.base, 'Content-Type': 'application/json', 'X-Office-Token': 'fixture-csrf' }, body: '{}' })).status, 404);
+ }
+});

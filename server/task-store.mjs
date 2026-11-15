@@ -15,6 +15,7 @@ import { resolutionPaused } from './resolution-policy.mjs';
 import { huddleInputHash, huddleFingerprint, huddleRetryHold, HUDDLE_MAX_RETRIES } from './huddle-policy.mjs';
 import { PREPARE_ACTION, preparationScope, parsePreparationApproval } from './scoped-approval.mjs';
 import { humanRequestFingerprint, humanRequestSpec, humanRequestHold, explicitApproval } from './human-relay-policy.mjs';
+import { projectPathsOverlap, holdsCodingProject } from './project-scope.mjs';
 const PROVIDERS = ['any', 'codex', 'claude', 'grok', 'grok-bot', 'gemini', 'local-qwen'];
 // Text assistance and external Grok Bot work do not hold the coding-folder lock.
 // Grok Bot still serializes its own claims within the same project.
@@ -33,7 +34,7 @@ export function reviewTaskFor(task, preReview = null, reviewerFor = REVIEWER_FOR
   const pre = preReview ? `\n\nGemini pre-review (read-only, ${preReview.status}):\n${String(preReview.result || preReview.error || '').slice(0, 4000)}` : '';
   return {
     title: `Review: ${String(task.title || '').slice(0, 220)}`,
-    description: `Cross review of task ${task.id}, written by ${author === 'claude' ? 'Claude Code' : 'Codex'}. You are the independent reviewer and did not write this code.\n\n1. Read the branch diff / recent commits for this work (git status, git diff, git log).\n2. Run the project's analyze and test commands.\n3. Do NOT rewrite or extend the feature. Either approve, or write concrete fix notes (file, problem, suggested fix).\n4. Report status "done" with "APPROVED: ..." or "FIX NOTES: ..." in the summary; use "blocked" only if you could not review.\n\nOriginal task description:\n${String(task.description || '').slice(0, 12000)}\n\nAuthor summary:\n${String(task.result || '').slice(0, 4000)}${pre}\nRisk: ${risk}`,
+    description: `Cross review of task ${task.id}, written by ${author === 'claude' ? 'Claude Code' : 'Codex'}. You are the independent reviewer and did not write this code.\n\n1. Inspect the task's changed files and author handoff. If the project uses Git, read its branch diff / recent commits (git status, git diff, git log); otherwise review the supplied files directly without initializing a repository.\n2. Run the project's documented validation and tests appropriate to this work. Do not assume every project has an analyze command or a software test suite.\n3. Do NOT rewrite or extend the feature. Either approve, or write concrete fix notes (file, problem, suggested fix).\n4. Report status "done" with "APPROVED: ..." or "FIX NOTES: ..." in the summary; use "blocked" only if you could not review.\n\nOriginal task description:\n${String(task.description || '').slice(0, 12000)}\n\nAuthor summary:\n${String(task.result || '').slice(0, 4000)}${pre}\nRisk: ${risk}`,
     projectPath: task.projectPath, provider: reviewerFor[author], role: 'Tester', priority: author === 'claude' && risk === 'ordinary' ? 'normal' : 'high', kind: 'review', reviewOf: task.id,
   };
 }
@@ -149,9 +150,14 @@ export function createTaskStore(options = {}) {
     const createdAt = stamp();
     const kind = provider === 'gemini' ? 'research' : choice(input.kind === 'research' ? 'task' : input.kind, 'kind', KINDS, 'task');
     if (provider === 'gemini') mkdirSync(researchDir, { recursive: true });
+    // Keep Gemini output in the private research directory while retaining the
+    // user's selected source project as read-only context. Older research cards
+    // have only projectPath=researchDir and must not gain a fictitious source.
+    const requestedContext = provider === 'gemini' ? normalizeTaskProject(own(input, 'contextProjectPath') ? input.contextProjectPath : input.projectPath, true) : '';
+    const contextProjectPath = requestedContext && requestedContext !== normalizeTaskProject(researchDir) ? requestedContext : undefined;
     if (approvalAction && kind !== 'task') fail('Scoped preparation requires an ordinary coding task.');
     const reviewOf = kind === 'review' && typeof input.reviewOf === 'string' ? text(input.reviewOf, 'Reviewed task', 200) : null;
-    return { id: meta.id || randomUUID(), kind, reviewOf, ...(approvalAction ? { approvalAction } : {}), title: text(input.title, 'Title', 240, true), description: text(input.description, 'Description', 20000), projectPath: provider === 'gemini' ? researchDir : normalizeTaskProject(input.projectPath), provider, ...(provider === 'local-qwen' ? { supportType: input.supportType } : {}), role: choice(input.role, 'role', ROLES, 'any'), priority: choice(input.priority, 'priority', PRIORITIES, 'normal'), status: approvalAction ? 'blocked' : 'pending', ...(own(input, 'parked') ? { parked: input.parked } : {}), source: ['grok', 'qwen-watch', 'qwen-huddle'].includes(meta.source) ? meta.source : 'user', managementRequestId: meta.managementRequestId || null, assignee: null, result: '', error: approvalAction ? 'Approval required: prepare_sanitized_snapshot.' : '', createdAt, updatedAt: createdAt, version: 1 };
+    return { id: meta.id || randomUUID(), kind, reviewOf, ...(approvalAction ? { approvalAction } : {}), title: text(input.title, 'Title', 240, true), description: text(input.description, 'Description', 20000), projectPath: provider === 'gemini' ? researchDir : normalizeTaskProject(input.projectPath), ...(contextProjectPath ? { contextProjectPath } : {}), provider, ...(provider === 'local-qwen' ? { supportType: input.supportType } : {}), role: choice(input.role, 'role', ROLES, 'any'), priority: choice(input.priority, 'priority', PRIORITIES, 'normal'), status: approvalAction ? 'blocked' : 'pending', ...(own(input, 'parked') ? { parked: input.parked } : {}), source: ['grok', 'qwen-watch', 'qwen-huddle'].includes(meta.source) ? meta.source : 'user', managementRequestId: meta.managementRequestId || null, assignee: null, result: '', error: approvalAction ? 'Approval required: prepare_sanitized_snapshot.' : '', createdAt, updatedAt: createdAt, version: 1 };
   }
   const maybeTask = id => { const row = id && rowFor(id); return row ? JSON.parse(row.record) : null; };
   const reviewEditable = task => task && ['done', 'blocked'].includes(task.status) && !resolutionPaused(task) &&
@@ -485,8 +491,13 @@ export function createTaskStore(options = {}) {
         if (input.source === 'office-ui' ? !['pending', 'delivered'].includes(request.state) : request.state !== 'delivered' || !request.delivery) fail('Only a delivered, unanswered question can receive a reply.', 'CONFLICT', 409);
         if (task.status !== 'blocked' || resolutionPaused(task) || humanRequestFingerprint(task) !== request.fingerprint || task.humanGate?.requestId !== id) fail('Only a current, unanswered question can receive a reply; the task changed after this question.', 'VERSION_CONFLICT', 409);
         const textOnlyLocal = task.provider === 'local-qwen' && !task.projectPath && !localQwenTaskError(task);
+        // For research cards the private output folder is not the user's source.
+        // An information reply can repair a missing source without moving output
+        // or granting write access to that source.
+        const researchSource = task.provider === 'gemini' && Boolean(task.contextProjectPath);
+        const originalProject = researchSource ? task.contextProjectPath : task.projectPath;
         let existingProject = '';
-        try { existingProject = normalizeTaskProject(task.projectPath, true); } catch {}
+        try { existingProject = normalizeTaskProject(originalProject, true); } catch {}
         let resolvedProject = existingProject;
         if (own(input, 'projectPath')) {
           if (request.kind !== 'info' || decision !== 'provide_info' || existingProject) fail('A replacement project folder is allowed only for information replies when the original folder is unavailable.');
@@ -497,10 +508,12 @@ export function createTaskStore(options = {}) {
         }
         if (decision !== 'deny' && !resolvedProject && !textOnlyLocal) fail('The project folder is still unavailable. Provide an existing projectPath explicitly quoted in the user reply, or restore the original folder.', 'MISSING_PROJECT', 409);
         const answeredAt = stamp(), state = decision === 'deny' ? 'denied' : 'answered';
-        const pathEvidence = own(input, 'projectPath') ? { originalProjectPath: task.projectPath, providedProjectPath: input.projectPath, resolvedProjectPath: resolvedProject } : {};
+        const pathEvidence = own(input, 'projectPath') ? researchSource
+          ? { originalContextProjectPath: task.contextProjectPath, providedContextProjectPath: input.projectPath, resolvedContextProjectPath: resolvedProject }
+          : { originalProjectPath: task.projectPath, providedProjectPath: input.projectPath, resolvedProjectPath: resolvedProject } : {};
         const answer = { source: input.source, replyAuthor: 'user', userMessageId, userReply, decision, ...(userAction ? { userAction } : {}), answeredAt, ...pathEvidence, ...(request.approvalScope ? { requestId: id, questionHash: request.questionHash, fingerprint: request.fingerprint, approvalScope: request.approvalScope, delivery: request.delivery, ...(authorization ? { authorization } : {}) } : {}) };
         const needsPreparationApproval = !!task.approvalAction && request.kind === 'info' && decision === 'provide_info';
-        const resumedTask = { ...task, projectPath: resolvedProject || task.projectPath, ...(needsPreparationApproval ? { humanRevision: (task.humanRevision || 0) + 1 } : {}) };
+        const resumedTask = { ...task, ...(researchSource ? { contextProjectPath: resolvedProject || task.contextProjectPath } : { projectPath: resolvedProject || task.projectPath }), ...(needsPreparationApproval ? { humanRevision: (task.humanRevision || 0) + 1 } : {}) };
         db.prepare('INSERT INTO human_replies(message_id,request_id,reply_hash) VALUES(?,?,?)').run(userMessageId, id, replyHash);
         const updatedRequest = writeRequest({ ...request, state, answer, updatedAt: answeredAt });
         const gate = { ...task.humanGate, state };
@@ -554,13 +567,21 @@ export function createTaskStore(options = {}) {
         if (JSON.parse(db.prepare('SELECT record FROM settings WHERE id=1').get().record).autoPickup === false) fail('Automatic pickup is paused.', 'CONFLICT', 409);
         if (!['claude', 'codex'].includes(provider)) fail('Investigations require a coding investigator.');
         const fingerprint = huddleFingerprint(task);
+        const sourceContext = task.provider === 'gemini' && task.contextProjectPath
+          ? { contextProjectPath: task.contextProjectPath, contextAccess: 'read-only', researchOutputPath: task.projectPath } : {};
+        const investigationProject = () => {
+          let folder;
+          try { folder = normalizeTaskProject(sourceContext.contextProjectPath || task.projectPath, true); } catch {}
+          if (!folder) { folder = path.join(home, 'unblock-investigations'); mkdirSync(folder, { recursive: true }); }
+          return folder;
+        };
         const investigationId = `unblock:${createHash('sha256').update(task.id + huddleInputHash(task) + task.provider).digest('hex').slice(0, 32)}`;
         const existing = rowFor(investigationId);
         if (existing) {
           const old = JSON.parse(existing.record);
           if (old.investigationPolicy !== 2 && ['blocked', 'done'].includes(old.status) && !resolutionPaused(old)) {
-            const renewed = writeTask({ ...old, provider, status: 'pending', investigationPolicy: 2,
-              description: JSON.stringify({ taskId: task.id, title: task.title, provider: task.provider, projectPath: task.projectPath,
+            const renewed = writeTask({ ...old, provider, projectPath: investigationProject(), status: 'pending', investigationPolicy: 2,
+              description: JSON.stringify({ taskId: task.id, title: task.title, provider: task.provider, projectPath: task.projectPath, ...sourceContext,
                 request: task.description.slice(0, 10000), error: task.error.slice(0, 2000), priorResult: task.result.slice(-4000),
                 previousDiagnosis: old.result.slice(-2500) }),
               resolutionFingerprint: fingerprint, result: '', error: '', updatedAt: stamp(), version: old.version + 1 },
@@ -573,10 +594,8 @@ export function createTaskStore(options = {}) {
             finding: old.result, nextAction: '同一任务已完成或尝试过排查，请按排查结论补充条件；不会重复生成排查卡。' }, version: task.version + 1 });
           return { task: old, created: false };
         }
-        let projectPath;
-        try { projectPath = normalizeTaskProject(task.projectPath, true); } catch {}
-        if (!projectPath) { projectPath = path.join(home, 'unblock-investigations'); mkdirSync(projectPath, { recursive: true }); }
-        const evidence = { taskId: task.id, title: task.title, provider: task.provider, kind: task.kind, projectPath: task.projectPath,
+        const projectPath = investigationProject();
+        const evidence = { taskId: task.id, title: task.title, provider: task.provider, kind: task.kind, projectPath: task.projectPath, ...sourceContext,
           request: task.description.slice(0, 10000), error: task.error.slice(0, 2000), priorResult: task.result.slice(-5000) };
         const child = { ...normalizeTask({ title: `排查受阻：${task.title}`.slice(0, 240), description: JSON.stringify(evidence).slice(0, 19500),
           provider, kind: 'resolution', role: 'Facilitator', projectPath, priority: task.priority }, { id: investigationId, source: 'qwen-huddle' }),
@@ -680,6 +699,8 @@ export function createTaskStore(options = {}) {
         if (version != null && (!Number.isSafeInteger(version) || version !== task.version)) fail('Task changed. Refresh before editing.', 'VERSION_CONFLICT', 409);
         for (const forbidden of ['id', 'assignee', 'claimToken', 'claimHash', 'source', 'managementRequestId', 'result', 'error']) if (own(patch, forbidden)) fail(`Cannot change ${forbidden}.`);
         const merged = { ...task, ...Object.fromEntries(['title', 'description', 'projectPath', 'provider', 'role', 'priority', 'supportType', 'parked', 'approvalAction'].filter(key => own(patch, key)).map(key => [key, patch[key]])) };
+        if (merged.provider === 'gemini' && own(patch, 'projectPath')) merged.contextProjectPath = patch.projectPath;
+        else if (task.provider === 'gemini' && merged.provider !== 'gemini' && !own(patch, 'projectPath')) merged.projectPath = task.contextProjectPath || '';
         const checked = normalizeTask(merged);
         const status = checked.approvalAction && checked.approvalAction !== task.approvalAction ? 'blocked' : own(patch, 'status') ? choice(patch.status, 'task status', ['pending', 'blocked', 'done']) : task.humanGate ? 'blocked' : task.status;
         if (status === 'pending' && task.humanGate) fail('Reply to the bound human question before resuming this task.', 'HUMAN_GATE', 409);
@@ -690,7 +711,7 @@ export function createTaskStore(options = {}) {
         }
         if (task.reviewPolicy === REVIEW_POLICY) stopReviewChildren(task);
         if (task.repairBinding || task.reviewBinding) invalidateReviewParent(task);
-        return writeTask({ ...task, ...(task.reviewPolicy === REVIEW_POLICY ? clearReview : {}), grokTriage: undefined, humanRevision: (task.humanRevision || 0) + 1, ...(task.humanGate ? { humanGate: { ...task.humanGate, state: 'stale' } } : {}), ...(checked.provider !== task.provider || huddleInputHash(checked) !== huddleInputHash(task) ? { resolution: undefined } : {}), ...(task.huddleRetry ? { huddleRetry: { ...task.huddleRetry, active: false } } : {}), approvalAction: checked.approvalAction, title: checked.title, description: checked.description, projectPath: checked.projectPath, provider: checked.provider, supportType: checked.supportType, ...(own(checked, 'parked') ? { parked: checked.parked } : {}), role: checked.role, priority: checked.priority, status, ...manual, ...(task.repairBinding || task.reviewBinding ? { reviewBinding: undefined, repairBinding: undefined, repairOf: undefined, repairRound: undefined, reviewDetachedFrom: task.repairOf || task.reviewBinding?.rootId } : {}), updatedAt: stamp(), version: task.version + 1 }, { projectKey: projectLockKey({ ...checked, id: task.id }), claimHash: null, leaseUntil: null });
+        return writeTask({ ...task, ...(task.reviewPolicy === REVIEW_POLICY ? clearReview : {}), grokTriage: undefined, humanRevision: (task.humanRevision || 0) + 1, ...(task.humanGate ? { humanGate: { ...task.humanGate, state: 'stale' } } : {}), ...(checked.provider !== task.provider || huddleInputHash(checked) !== huddleInputHash(task) ? { resolution: undefined } : {}), ...(task.huddleRetry ? { huddleRetry: { ...task.huddleRetry, active: false } } : {}), approvalAction: checked.approvalAction, title: checked.title, description: checked.description, projectPath: checked.projectPath, contextProjectPath: checked.contextProjectPath, kind: checked.kind, reviewOf: checked.reviewOf, provider: checked.provider, supportType: checked.supportType, ...(own(checked, 'parked') ? { parked: checked.parked } : {}), role: checked.role, priority: checked.priority, status, ...manual, ...(task.repairBinding || task.reviewBinding ? { reviewBinding: undefined, repairBinding: undefined, repairOf: undefined, repairRound: undefined, reviewDetachedFrom: task.repairOf || task.reviewBinding?.rootId } : {}), updatedAt: stamp(), version: task.version + 1 }, { projectKey: projectLockKey({ ...checked, id: task.id }), claimHash: null, leaseUntil: null });
       });
     },
     claimTask(input, { taskId } = {}) {
@@ -739,6 +760,11 @@ export function createTaskStore(options = {}) {
           }
           const projectKey = projectLockKey({ ...task, projectPath: project });
           if (db.prepare("SELECT id FROM tasks WHERE status='running' AND project_key=?").get(projectKey)) continue;
+          // The exact-key SQLite index also needs a hierarchical check: a task
+          // rooted in /repo can edit /repo/packages/app. Do this under the same
+          // write transaction so independent runner processes cannot race.
+          if (holdsCodingProject(task) && db.prepare("SELECT record FROM tasks WHERE status='running'").all()
+            .some(row => { const active = JSON.parse(row.record); return holdsCodingProject(active) && projectPathsOverlap(project, active.projectPath); })) continue;
           const claimToken = randomBytes(32).toString('base64url');
           const assignee = { id: worker.id, name: worker.name, provider: task.provider === 'any' ? worker.provider : task.provider, role: task.role === 'any' ? worker.roles.find(value => value !== 'any') || 'Helper' : task.role };
           const claimed = { ...task, humanEpisode: (task.humanEpisode || 0) + 1, projectPath: project, status: 'running', assignee, result: '', error: '', updatedAt: stamp(), version: task.version + 1 };

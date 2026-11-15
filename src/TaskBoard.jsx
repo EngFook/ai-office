@@ -1,3 +1,4 @@
+import { requestProjectPath, requestProviderOptions } from './request-form.js';
 import { officeCapability } from './office-capabilities.js';
 import { officeSnapshotStale } from './office-operations.js';
 import { useOfficeDate } from './OfficeIdentity';
@@ -147,6 +148,7 @@ export function useTaskBoard() {
   }, [refresh])
   const methods = useMemo(() => ({
     cardActions: (action, items) => mutate('/api/office/tasks/card-actions', 'POST', { action, items }),
+    createProject: payload => mutate('/api/office/projects', 'POST', payload),
     createTask: payload => mutate('/api/office/tasks', 'POST', payload),
     updateTask: (id, patch, version) => mutate(`/api/office/tasks/${encodeURIComponent(id)}`, 'PATCH', { ...patch, ...(version !== undefined ? { version } : {}) }),
     createRole: (payload, description) => mutate('/api/office/roles', 'POST', typeof payload === 'string' ? { name: payload, description: description || '' } : payload),
@@ -169,8 +171,9 @@ function ProviderReadiness({ runtime }) {
   return <div className="tb-readiness" aria-label="Agent readiness">{['codex', 'claude', 'gemini', 'local-qwen', 'grok-bot'].map(id => {
     if (id === 'grok-bot') return <span className="is-external" key={id}><ExternalLink size={11}/><span>Grok Bot</span><b>Managed in Grok Bot</b></span>
     const provider = runtime?.providers?.[id]
-    const ready = id === 'gemini' ? geminiReadiness(provider) === 'ready' : provider?.available === true && provider?.authenticated === true
-    const label = id === 'gemini' ? ({ready:'Ready','needs-login':'Sign-in needed',unavailable:'Unavailable',disabled:'Disabled','model-unavailable':'Configured model unavailable',unknown:'Status unconfirmed'})[geminiReadiness(provider)] : ready ? 'Ready' : provider?.available === true ? provider?.authenticated === false ? id === 'local-qwen' ? 'Model not installed' : 'Sign-in needed' : 'Checking' : 'Unavailable'
+    const disabled = provider?.disabled === true || provider?.enabled === false || provider?.authState === 'disabled'
+    const ready = !disabled && (id === 'gemini' ? geminiReadiness(provider) === 'ready' : provider?.available === true && provider?.authenticated === true)
+    const label = disabled ? 'Disabled' : id === 'gemini' ? ({ready:'Ready','needs-login':'Sign-in needed',unavailable:'Unavailable',disabled:'Disabled','model-unavailable':'Configured model unavailable',unknown:'Status unconfirmed'})[geminiReadiness(provider)] : ready ? 'Ready' : provider?.available === true ? provider?.authenticated === false ? id === 'local-qwen' ? 'Model not installed' : 'Sign-in needed' : 'Checking' : 'Unavailable'
     return <span className={ready ? 'is-ready' : ''} key={id} title={provider?.reason || label}>{ready ? <CheckCircle2 size={11}/> : <AlertCircle size={11}/>}<span>{provider?.label || PROVIDERS[id]}</span><b>{label}</b></span>
   })}</div>
 }
@@ -184,14 +187,20 @@ function GrokBotNotice({ provider }) {
   return provider === 'grok-bot' ? <p className="tb-note tb-field--wide tb-grok-bot-note"><ExternalLink size={14}/><span>Grok Bot must claim this request in its app. Office auto pickup does not start it. Use Grok Dispatch for planning instructions.</span></p> : null
 }
 
-function RequestFields({ value, onChange, roles, includeTitle = true }) {
+export function ProjectFolderField({ value = '', onChange, projects = [] }) {
+  const zh = useLang() === 'zh'
+  const id = React.useId()
+  return <label className="tb-field tb-field--wide">Project folder<input list={id} maxLength={2048} value={value} onChange={event => onChange(event.target.value)} placeholder="/path/to/your/project" spellCheck={false}/><datalist id={id}>{projects.filter(project => project.path).map(project => <option data-no-i18n key={project.path} value={project.path}>{project.name}</option>)}</datalist><small data-no-i18n>{zh ? '填写运行办公室的电脑上的现有目录；可选已登记项目，或填写其他项目的完整路径。' : 'Use an existing folder on the computer running this office. Choose a registered project or enter another full path.'}</small></label>
+}
+
+export function RequestFields({ value, onChange, roles, state = {}, includeTitle = true }) {
   const lang = useLang()
   const change = (key, next) => onChange({ ...value, [key]: next })
   return <>
     {includeTitle && <label className="tb-field">Request title<input required maxLength={200} value={value.title} onChange={event => change('title', event.target.value)} placeholder="What needs to get done?"/></label>}
     <label className="tb-field tb-field--wide">Details<textarea required={['local-qwen', 'gemini'].includes(value.provider)} rows={3} maxLength={20000} value={value.description} onChange={event => change('description', event.target.value)} placeholder={value.provider === 'gemini' ? geminiSourcePrompt(null, lang) : "Describe the result you want and any constraints."}/></label>
-    {value.provider !== 'gemini' && <label className="tb-field tb-field--wide">Project folder<input maxLength={2048} value={value.projectPath} onChange={event => change('projectPath', event.target.value)} placeholder="/path/to/your/project" spellCheck={false}/></label>}
-    <label className="tb-field">Agent<select value={value.provider} onChange={event => change('provider', event.target.value)}>{['any', 'claude', 'codex', 'gemini', 'local-qwen', 'grok-bot'].map(id => <option key={id} value={id}>{PROVIDERS[id]}</option>)}</select></label>
+    <ProjectFolderField value={value.provider === 'gemini' ? (value.contextProjectPath ?? value.projectPath) : value.projectPath} onChange={path => onChange({ ...value, projectPath: path, ...(value.provider === 'gemini' ? { contextProjectPath: path } : {}) })} projects={state.projectCatalog || []}/>
+    <label className="tb-field">Agent<select value={value.provider} onChange={event => onChange({ ...value, provider: event.target.value, ...(value.provider === 'gemini' && event.target.value !== 'gemini' ? { projectPath: value.contextProjectPath || '', contextProjectPath: undefined } : {}) })}>{requestProviderOptions(state, value.provider).map(option => <option key={option.id} value={option.id} disabled={option.disabled}>{t(option.label)}{option.configuredDisabled ? ` · ${t('Disabled')}` : ''}</option>)}</select></label>
     <LocalQwenFields value={value} onChange={onChange}/>
     <GrokBotNotice provider={value.provider}/>
     <label className="tb-field">Role<select value={value.role} onChange={event => change('role', event.target.value)}><option value="any">Any role</option>{roleNames(roles).map(name => <option key={name} value={name}>{roleLabel(name, value.provider)}</option>)}</select></label>
@@ -235,9 +244,9 @@ export function TaskDetails({ task, board, roles, pendingReason, onClose, onOpen
       <h2 id="tb-task-heading" data-no-i18n>{task.title}</h2>
       <ReviewBadge task={task} tasks={board.state.tasks}/>
       <ErrorNotice error={error}/>
-      {editing ? <form className="tb-edit-form" onSubmit={event => { event.preventDefault(); const { title, description, projectPath, provider, role, priority, supportType } = draft; save({ title, description, projectPath, provider, role, priority, supportType }, draft.version) }}>
+      {editing ? <form className="tb-edit-form" onSubmit={event => { event.preventDefault(); const { title, description, projectPath, contextProjectPath, provider, role, priority, supportType } = draft; save({ title, description, projectPath: provider === 'gemini' ? (contextProjectPath ?? projectPath) : projectPath, provider, role, priority, supportType }, draft.version) }}>
         {draft.version !== task.version && <div className="tb-edit-conflict"><span>This request changed while you were editing.</span><button type="button" onClick={() => setDraft({ ...freshRequest(), ...task })}>Load latest request</button></div>}
-        <RequestFields value={draft} onChange={setDraft} roles={roles}/>
+        <RequestFields value={draft} onChange={setDraft} roles={roles} state={board?.state}/>
         <div className="tb-dialog__actions"><button type="button" className="tb-button" disabled={busy} onClick={() => setEditing(false)}>Cancel</button><button className="tb-button tb-button--primary" disabled={busy}>{busy ? <LoaderCircle className="tb-spin" size={14}/> : <Check size={14}/>} Save request</button></div>
       </form> : <>
         {['pending', 'blocked'].includes(task.status) && <div className="tb-wait-details"><StateIcon size={15}/><div>{!(task.status === 'blocked' && task.resolution) && <WaitSummary summary={wait}/>} {reason && <details><summary>Full reason</summary><pre data-no-i18n>{reason}</pre></details>}</div></div>}
@@ -333,8 +342,8 @@ function GrokConnection({ board }) {
   }
   return <details className="tb-api-route"><summary><ShieldCheck size={15}/><span>Optional xAI API connection</span>{apiConnected && <b>Connected</b>}<ChevronDown size={14}/></summary><section className="tb-panel tb-grok-connection">
     <div className="tb-panel__heading"><span className="tb-panel__icon"><ShieldCheck size={19}/></span><div><h3>Connect xAI API</h3><p>A connection route for local Grok planning.</p></div><span className={`tb-connection-state${apiConnected ? ' is-connected' : ''}`}><i/>{status}</span></div>
-    {apiConnected && !change ? <><p className="tb-note">Connected on this Mac{grok.model ? ` · ${grok.model}` : ''}.</p><button type="button" className="tb-text-button" onClick={() => setChange(true)}>Change connection <Settings2 size={12}/></button></> : <>
-      <p className="tb-body-copy">Connect with your own xAI API key to enable local planning. It is stored by the local server on this Mac. <a href="https://console.x.ai/" target="_blank" rel="noreferrer">Open xAI Console <ExternalLink size={11}/></a></p>
+    {apiConnected && !change ? <><p className="tb-note">Connected on this computer{grok.model ? ` · ${grok.model}` : ''}.</p><button type="button" className="tb-text-button" onClick={() => setChange(true)}>Change connection <Settings2 size={12}/></button></> : <>
+      <p className="tb-body-copy">Connect with your own xAI API key to enable local planning. It is stored by the local server on this computer. <a href="https://console.x.ai/" target="_blank" rel="noreferrer">Open xAI Console <ExternalLink size={11}/></a></p>
       <form onSubmit={submit} className="tb-connect-form" autoComplete="off">
         <label className="tb-field">xAI API key<input type="password" name="grok_api_key" autoComplete="off" autoCapitalize="none" spellCheck={false} required value={key} onChange={event => setKey(event.target.value)} placeholder="Paste your API key"/></label>
         <label className="tb-field">Model <span>optional</span><input list="tb-grok-models" value={model} onChange={event => setModel(event.target.value)} autoComplete="off" spellCheck={false} placeholder="Choose automatically"/>{models.length > 0 && <datalist id="tb-grok-models">{models.map(name => <option key={name} value={name}/>)}</datalist>}</label>
@@ -367,16 +376,16 @@ When actually complete, use {"claimToken":"TOKEN_FROM_CLAIM","status":"done","re
 ${executable} finish TASK_ID < /absolute/path/to/completion.json
 Only finish the Grok Bot task you claimed. Do not finish other providers' tasks or mark planning as execution. Office auto pickup does not launch Grok Bot.
 ` : ''
-  const instructions = available ? `Use the Studio command interface on this Mac as the Grok management team.\n\nOffice project: ${command.projectPath}\n\nRead the current board and queued instructions:\n${executable} status\n${executable} pending-instructions\n\nFor each requested instruction, prepare one JSON plan with these fields:\n- summary: a concise planning summary\n- roles: management roles with name, description and provider "grok"\n- tasks: bounded execution requests with title, description, projectPath, provider ("any", "codex", "claude", "gemini" or "grok-bot"), role ("any", "Facilitator", "Admin", "Helper", "Tester"), and priority ("normal", "high" or "low")\n\nUse the actual instruction ID from pending-instructions. Save the plan to a JSON file, then submit its contents through standard input:\n${executable} apply-plan INSTRUCTION_ID < /absolute/path/to/plan.json\n\n${command.commands.includes('bot-heartbeat') ? `Report your own actual presence through JSON standard input:\n${executable} bot-heartbeat < /absolute/path/to/bot-status.json\nUse a stable id and your actual name and role. The status object has {"id":"grok-bot-main","name":"Grok Bot","role":"Manager","status":"idle","activity":""}. While planning or working on a claimed Grok Bot task, report status "working" and your actual activity every 30 seconds; report "idle" when finished. Never report working merely to appear in the office.\n\n` : ''}Use only the project folder supplied in the instruction. Leave the path empty if none was supplied; do not invent a folder. Read the existing board and roles first, and avoid duplicate requests. Planning a coding task does not complete its execution. Do not mark other providers' execution requests done.${taskInstructions}\n` : ''
+  const instructions = available ? `Use the Studio command interface on this computer as the Grok management team.\n\nOffice project: ${command.projectPath}\n\nRead the current board and queued instructions:\n${executable} status\n${executable} pending-instructions\n\nFor each requested instruction, prepare one JSON plan with these fields:\n- summary: a concise planning summary\n- roles: management roles with name, description and provider "grok"\n- tasks: bounded execution requests with title, description, projectPath, provider ("any", "codex", "claude", "gemini" or "grok-bot"), role ("any", "Facilitator", "Admin", "Helper", "Tester"), and priority ("normal", "high" or "low")\n\nUse the actual instruction ID from pending-instructions. Save the plan to a JSON file, then submit its contents through standard input:\n${executable} apply-plan INSTRUCTION_ID < /absolute/path/to/plan.json\n\n${command.commands.includes('bot-heartbeat') ? `Report your own actual presence through JSON standard input:\n${executable} bot-heartbeat < /absolute/path/to/bot-status.json\nUse a stable id and your actual name and role. The status object has {"id":"grok-bot-main","name":"Grok Bot","role":"Manager","status":"idle","activity":""}. While planning or working on a claimed Grok Bot task, report status "working" and your actual activity every 30 seconds; report "idle" when finished. Never report working merely to appear in the office.\n\n` : ''}Use only the project folder supplied in the instruction. Leave the path empty if none was supplied; do not invent a folder. Read the existing board and roles first, and avoid duplicate requests. Planning a coding task does not complete its execution. Do not mark other providers' execution requests done.${taskInstructions}\n` : ''
   const copy = async () => {
     setCopyError('')
     try { await navigator.clipboard.writeText(instructions); setCopied(true) }
     catch { setCopyError('Copy is unavailable here. Select and copy the setup text below.'); setExpanded(true) }
   }
   return <section className="tb-panel tb-bot-local">
-    <div className="tb-panel__heading"><span className="tb-panel__icon"><Sparkles size={19}/></span><div><h3>Grok Bot · This Mac</h3><p>Use the installed Grok Bot with the local studio command interface.</p></div><span className={`tb-connection-state${presence?.connected ? ' is-connected' : ''}`}><i/>{presence?.connected ? 'Connected' : 'Local setup'}</span></div>
-    <p className="tb-body-copy">Use Grok Bot’s local-computer command prompt and approve the requested command. A cloud browser cannot open this Mac’s localhost.</p>
-    {available ? <><div className="tb-bot-local__actions"><button type="button" className="tb-button tb-button--purple" onClick={copy}>{copied ? <Check size={14}/> : <ClipboardList size={14}/>} {copied ? 'Copied setup' : 'Copy Bot setup'}</button><button type="button" className="tb-text-button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? 'Hide setup' : 'View setup'} <ChevronDown size={12}/></button></div>{expanded && <pre className="tb-bot-setup" tabIndex={0}>{instructions}</pre>}</> : <p className="tb-note">The local command interface is starting. Refresh to load this Mac’s setup.</p>}
+    <div className="tb-panel__heading"><span className="tb-panel__icon"><Sparkles size={19}/></span><div><h3>Grok Bot · This computer</h3><p>Use the installed Grok Bot with the local studio command interface.</p></div><span className={`tb-connection-state${presence?.connected ? ' is-connected' : ''}`}><i/>{presence?.connected ? 'Connected' : 'Local setup'}</span></div>
+    <p className="tb-body-copy">Use Grok Bot’s local-computer command prompt and approve the requested command. A cloud browser cannot open this computer’s localhost.</p>
+    {available ? <><div className="tb-bot-local__actions"><button type="button" className="tb-button tb-button--purple" onClick={copy}>{copied ? <Check size={14}/> : <ClipboardList size={14}/>} {copied ? 'Copied setup' : 'Copy Bot setup'}</button><button type="button" className="tb-text-button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? 'Hide setup' : 'View setup'} <ChevronDown size={12}/></button></div>{expanded && <pre className="tb-bot-setup" tabIndex={0}>{instructions}</pre>}</> : <p className="tb-note">The local command interface is starting. Refresh to load this computer’s setup.</p>}
     <ErrorNotice error={copyError}/>
     {presence?.connected && <div className="tb-bot-presence">{presence.agents?.map(agent => <div key={agent.id}><i className={agent.status === 'working' ? 'is-working' : ''}/><strong>{agent.name}</strong><span>{agent.status === 'working' ? 'Working' : 'Idle'}</span></div>)}{presence.lastSeen && <small>Last seen {dateLabel(presence.lastSeen)}</small>}</div>}
   </section>
@@ -414,9 +423,9 @@ export function TaskBoardSummary({ board, onOpen, onManagement }) {
   return <section className="tb-summary"><div className="tb-summary__heading"><ClipboardList size={18}/><h3>Task board</h3></div><div className="tb-summary__counts">{COLUMNS.map(column => <div key={column.id}><strong>{board?.loading ? '—' : counts[column.id]}</strong><small>{column.name}</small></div>)}</div>{board?.error && <p className="tb-summary__error" role="status">{board.error}</p>}<button className="tb-text-button" type="button" onClick={onOpen}>Open task board <ArrowRight size={13}/></button><button className="tb-summary__management" type="button" onClick={onManagement}><Sparkles size={14}/><span>Grok Dispatch<small>{board?.state?.grok?.connected ? 'Connected' : board?.state?.configuration ? 'Set up Grok Bot' : 'Set up Grok Bot or xAI API'}</small></span><ArrowRight size={13}/></button></section>
 }
 
-function NewRequest({ board, projectPath, provider = 'any', assistanceType, researchType, onClose }) {
+export function NewRequest({ board, projectPath, provider = 'any', assistanceType, researchType, onClose }) {
   const lang = useLang()
-  const [form, setForm] = useState(() => ({ ...freshRequest(), projectPath: projectPath || board.state.configuration?.workspace || '', provider: PROVIDERS[provider] && provider !== 'grok' ? provider : 'any', ...(assistanceType ? qwenAssistanceDraft(assistanceType) : {}), ...(assistanceType ? { title: t(LOCAL_QWEN_TYPES[assistanceType]) } : {}), ...(researchType ? geminiResearchDraft(researchType, lang) : {}) }))
+  const [form, setForm] = useState(() => ({ ...freshRequest(), projectPath: requestProjectPath(projectPath, board.state.configuration), provider: PROVIDERS[provider] && provider !== 'grok' ? provider : 'any', ...(assistanceType ? qwenAssistanceDraft(assistanceType) : {}), ...(assistanceType ? { title: t(LOCAL_QWEN_TYPES[assistanceType]) } : {}), ...(researchType ? geminiResearchDraft(researchType, lang) : {}) }))
   const [expanded, setExpanded] = useState(provider === 'grok-bot' || provider === 'local-qwen' || provider === 'gemini' || !!assistanceType || !!researchType)
   const [creating, setCreating] = useState(false)
   const input = useRef()
@@ -444,12 +453,12 @@ function NewRequest({ board, projectPath, provider = 'any', assistanceType, rese
         <div className="tb-new-request__fields">
           <label className="tb-field">Request title<input ref={input} required maxLength={200} value={form.title} onChange={event => setForm({ ...form, title: event.target.value })} placeholder="What needs to get done?"/></label>
           <label className="tb-field">Priority<select value={form.priority} onChange={event => setForm({ ...form, priority: event.target.value })}><option value="normal">Normal</option><option value="high">High</option><option value="low">Low</option></select></label>
-          {form.provider !== 'gemini' && <label className="tb-field tb-field--wide">Project folder<input maxLength={2048} value={form.projectPath} onChange={event => setForm({ ...form, projectPath: event.target.value })} placeholder="/path/to/your/project" spellCheck={false}/></label>}
+          <ProjectFolderField value={form.projectPath} onChange={projectPath => setForm({ ...form, projectPath })} projects={board.state.projectCatalog || []}/>
+          <label className="tb-field">Agent preference<select value={form.provider} onChange={event => { setForm({ ...form, provider: event.target.value }); if (['local-qwen', 'gemini', 'grok-bot'].includes(event.target.value)) setExpanded(true) }}>{requestProviderOptions(board.state, form.provider).map(option => <option key={option.id} value={option.id} disabled={option.disabled}>{t(option.label)}{option.configuredDisabled ? ` · ${t('Disabled')}` : ''}</option>)}</select></label>
+          <label className="tb-field tb-field--wide">Details<textarea required={['local-qwen', 'gemini'].includes(form.provider)} maxLength={20000} rows={4} value={form.description} onChange={event => setForm({ ...form, description: event.target.value })} placeholder={form.provider === 'local-qwen' ? qwenSourcePrompt(form.supportType, lang) : form.provider === 'gemini' ? geminiSourcePrompt(researchType, lang) : "Describe the result you want and any constraints."}/></label>
         </div>
         <button type="button" className="tb-details-toggle" aria-expanded={expanded} aria-controls="tb-new-request-advanced" onClick={() => setExpanded(!expanded)}>Advanced <ChevronDown size={13}/></button>
         {expanded && <div id="tb-new-request-advanced" className="tb-advanced">
-          <label className="tb-field tb-field--wide">Details<textarea required={['local-qwen', 'gemini'].includes(form.provider)} maxLength={20000} rows={5} value={form.description} onChange={event => setForm({ ...form, description: event.target.value })} placeholder={form.provider === 'local-qwen' ? qwenSourcePrompt(form.supportType, lang) : form.provider === 'gemini' ? geminiSourcePrompt(researchType, lang) : "Describe the result you want and any constraints."}/></label>
-          <label className="tb-field">Agent preference<select value={form.provider} onChange={event => setForm({ ...form, provider: event.target.value })}>{['any', 'claude', 'codex', 'gemini', 'local-qwen', 'grok-bot'].map(id => <option key={id} value={id}>{PROVIDERS[id]}</option>)}</select></label>
           <LocalQwenFields value={form} onChange={setForm}/>
           {form.provider === 'gemini' && <p className="form-note tb-field--wide" data-no-i18n>{lang === 'zh' ? '填写研究问题、版本、日期及约束。结果保存为带来源的只读研究笔记，不修改项目；代码实现与审查另交负责人。' : 'Supply research questions, versions, dates and constraints. Results become sourced, read-only research notes; implementation and review remain with their owners.'}</p>}
           <GrokBotNotice provider={form.provider}/>
@@ -462,8 +471,37 @@ function NewRequest({ board, projectPath, provider = 'any', assistanceType, rese
   </div>
 }
 
-export function TaskProjects({ board, onOpenAgent }) {
+export function NewProject({ board, onClose, onCreated }) {
+  const zh = useLang() === 'zh'
+  const [form, setForm] = useState({ name: '', path: '' })
+  const [saving, setSaving] = useState(false), [error, setError] = useState('')
+  const first = useRef()
+  useEffect(() => { const previous = document.activeElement; first.current?.focus(); return () => previous?.focus?.() }, [])
+  const submit = async event => {
+    event.preventDefault(); setSaving(true); setError('')
+    try { const saved = await board.createProject({ name: form.name.trim(), path: form.path.trim() }); onCreated?.(saved.project); onClose() }
+    catch (failure) { setError(textError(failure)) }
+    finally { setSaving(false) }
+  }
+  return <div className="tb-overlay" onMouseDown={event => { if (event.target === event.currentTarget && !saving) onClose() }}>
+    <section className="tb-dialog tb-new-project" role="dialog" aria-modal="true" aria-labelledby="tb-new-project-title" data-no-i18n onKeyDown={event => { containDialogFocus(event); if (['Escape', 'Tab'].includes(event.key)) event.stopPropagation(); if (event.key === 'Escape' && !saving) onClose() }}>
+      <button type="button" className="tb-dialog__close" disabled={saving} onClick={onClose} aria-label={zh ? '关闭添加项目' : 'Close new project'}><X size={19}/></button>
+      <h2 id="tb-new-project-title">{zh ? '添加项目' : 'Add project'}</h2>
+      <p>{zh ? '登记已有项目目录，之后可为这个项目创建和筛选任务。不会创建或移动文件，也不会自动开始执行。' : 'Register an existing project folder to create and filter its tasks. This does not create or move files, or start an agent.'}</p>
+      <form onSubmit={submit}>
+        <label className="tb-field">{zh ? '项目名称' : 'Project name'}<input ref={first} required maxLength={100} value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} placeholder={zh ? '例如：客户网站' : 'e.g. Customer website'}/></label>
+        <label className="tb-field">{zh ? '项目完整路径' : 'Full project folder path'}<input required maxLength={2048} value={form.path} onChange={event => setForm({ ...form, path: event.target.value })} placeholder="/path/to/your/project" spellCheck={false}/></label>
+        <p className="form-note">{zh ? '路径属于运行办公室的电脑；手机或其他设备上的本地路径不适用。' : 'This path belongs to the computer running the office, not the phone or device viewing it.'}</p>
+        {error && <p className="tb-error" role="alert">{error}</p>}
+        <div className="tb-dialog__actions"><button type="button" className="tb-button" disabled={saving} onClick={onClose}>{zh ? '取消' : 'Cancel'}</button><button className="tb-button tb-button--primary" disabled={saving || !form.name.trim() || !form.path.trim()}>{saving ? <LoaderCircle className="tb-spin" size={14}/> : <Plus size={14}/>} {saving ? (zh ? '保存中…' : 'Saving…') : (zh ? '添加项目' : 'Add project')}</button></div>
+      </form>
+    </section>
+  </div>
+}
+
+export function TaskProjects({ board, onOpenAgent, onAddProject }) {
   const [projectPath, setProjectPath] = useState(null)
+  const zh = useLang() === 'zh'
   const projects = taskProjects(board?.state?.tasks || [],board?.state?.projectCatalog || [])
   if (projectPath !== null) return <div className="tb-project-view">
     <button type="button" className="tb-button tb-project-back" onClick={() => setProjectPath(null)}>← Back to projects</button>
@@ -477,7 +515,7 @@ export function TaskProjects({ board, onOpenAgent }) {
       {project.path && <small data-no-i18n>{project.path}</small>}
       {project.folders.length > 1 && <small>{`${project.folders.length} folders, including worktrees`}</small>}
       <span>Open task board <ArrowRight size={13}/></span>
-    </button>)}</div> : <p>No project requests yet. Add a request with a project folder.</p>}
+    </button>)}</div> : <div className="tb-project-empty" data-no-i18n><p>{zh ? '还没有项目。先添加一个现有目录，再在项目任务板里添加请求。' : 'No projects yet. Add an existing folder, then create a request on its task board.'}</p>{onAddProject && officeCapability(board?.state, 'projects') && <button type="button" className="tb-button tb-button--primary" onClick={onAddProject}><Plus size={14}/>{zh ? '添加项目' : 'Add project'}</button>}</div>}
   </section>
 }
 

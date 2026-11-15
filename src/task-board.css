@@ -207,3 +207,10 @@
 .tb-stale-snapshot{padding:11px 13px;border:1px solid #ac824f;border-radius:7px;background:#3b3020;color:#f1d0a3;font-size:12px;line-height:1.6}
 
 .tb-review-badge.is-historical{border-color:#7d8490;background:#2b3440;color:#c8d4e1}
+
+.tb-field>small{font-size:11px;line-height:1.6;font-weight:400;color:#adc0c8}
+.tb-new-project>p,.tb-project-empty>p{font-size:12px;line-height:1.7;color:#b8c9cb;margin-bottom:18px}
+.tb-new-project form{display:grid;gap:16px}
+.tb-new-project .form-note{font-size:11px;line-height:1.6;color:#a9bfc2;margin:0}
+.tb-new-project button:disabled{opacity:.5;cursor:default}
+.tb-new-request__fields>.tb-field:has(>select){min-width:0}

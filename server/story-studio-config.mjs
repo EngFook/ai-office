@@ -5,11 +5,13 @@ import { readProjectCatalog } from './project-catalog.mjs';
 
 export const STORY_STUDIO_INTERVAL_MS = 6 * 60 * 60 * 1000;
 export const STORY_STUDIO_GEMINI_LIMIT = 8;
-export const STORY_STUDIO_DEFAULT_GOAL = '为已配置项目的既有故事撰写可供选择的原创延伸场景，先研究写作技法和创意，再形成约600–1000字的中文候选剧本，核查人物动机、伏笔、因果和设定后修订。不得改写正典、代替用户确定未定真相或自动写入项目。';
+export const STORY_STUDIO_DEFAULT_LANGUAGE = '中文';
+export const STORY_STUDIO_DEFAULT_WRITING = '按给定节拍写一场600–1000字的中文候选剧本。保留人物行动、清楚冲突、具体代价、结尾钩子。正文加标记总长不超过2400汉字，不要输出点评代替正文。';
+export const STORY_STUDIO_DEFAULT_GOAL = '为已配置项目的既有故事撰写可供选择的原创延伸场景，先研究写作技法和创意，再按配置的语言及写作要求形成候选剧本，核查人物动机、伏笔、因果和设定后修订。不得改写正典、代替用户确定未定真相或自动写入项目。';
 export const STORY_STUDIO_DEFAULT_FOCUS = Object.freeze(['人物动机：选择与代价', '冲突：双方各自的理由', '悬疑：可核对的线索', '反转：改变解释但不改事实', '节奏：张力与停顿', '伏笔回收：局部兑现与新问题']);
 export const STORY_STUDIO_DEFAULT_PREAMBLE = '以下为已配置正典来源的逐字摘录；不是完整正典。仅写可供用户选择的新候选场景，不能把新设定当作已有事实。未定的真相只能提出备选，不擅自定案。';
 const PROJECT_ID = /^[a-z0-9_-]{1,100}$/i;
-const CONFIG_KEYS = ['version', 'enabled', 'projectId', 'projectName', 'sourceRoot', 'projectPath', 'goal', 'focus', 'canon'];
+const CONFIG_KEYS = ['version', 'enabled', 'projectId', 'projectName', 'sourceRoot', 'projectPath', 'goal', 'focus', 'canon', 'intervalMs', 'geminiDailyLimit', 'language', 'writingInstructions'];
 const SOURCE_KEYS = ['path', 'mode', 'heading', 'join', 'patterns', 'minMatches', 'exactMatches', 'pattern', 'versionPattern', 'minVersion', 'requireText'];
 const text = (value, max) => typeof value === 'string' && value.length <= max && Buffer.byteLength(value) <= max * 4;
 const invalid = message => { throw new Error(message); };
@@ -57,9 +59,17 @@ export function validateStoryStudioConfig(input = {}) {
   if (!Array.isArray(focus) || !focus.length || focus.length > 20 || focus.some(item => !text(item, 200) || !item.trim())) throw new Error('Invalid story focus list');
   const canon = validateStoryCanon(input.canon);
   if (input.enabled && !canon) throw new Error('Story studio needs canon sources for the configured project');
+  const intervalMs = input.intervalMs ?? STORY_STUDIO_INTERVAL_MS, geminiDailyLimit = input.geminiDailyLimit ?? STORY_STUDIO_GEMINI_LIMIT;
+  if (!Number.isSafeInteger(intervalMs) || intervalMs < 15 * 60000 || intervalMs > 7 * 86400000) throw new Error('Story intervalMs must be between 15 minutes and 7 days');
+  if (!Number.isSafeInteger(geminiDailyLimit) || geminiDailyLimit < 1 || geminiDailyLimit > 48) throw new Error('Story geminiDailyLimit must be between 1 and 48 cards per rolling day');
+  const language = input.language ?? STORY_STUDIO_DEFAULT_LANGUAGE;
+  if (typeof language !== 'string' || !language.trim() || language.length > 80 || /[\x00-\x1f\x7f]/.test(language)) throw new Error('Invalid story language');
+  const writingInstructions = input.writingInstructions ?? (language === STORY_STUDIO_DEFAULT_LANGUAGE ? STORY_STUDIO_DEFAULT_WRITING
+    : 'Write one bounded original scene or short chapter in the requested language. Preserve characters, clear conflict, concrete consequences and a closing hook. Deliver actual prose rather than commentary; the complete candidate must fit within 8000 UTF-8 bytes.');
+  if (typeof writingInstructions !== 'string' || !writingInstructions.trim() || writingInstructions.length > 1000 || Buffer.byteLength(writingInstructions) > 2000 || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(writingInstructions)) throw new Error('Invalid story writingInstructions');
   return { version: 1, enabled: input.enabled, projectId, projectName: projectName ? projectName.trim() : null, sourceRoot: input.sourceRoot ? path.normalize(input.sourceRoot) : null,
     projectPath: input.projectPath ? path.normalize(input.projectPath) : null, goal: goal.trim(), focus: [...focus], canon,
-    intervalMs: STORY_STUDIO_INTERVAL_MS, geminiDailyLimit: STORY_STUDIO_GEMINI_LIMIT };
+    intervalMs, geminiDailyLimit, language: language.trim(), writingInstructions: writingInstructions.trim() };
 }
 // Project defaults (name, storyStudio block) may come from the owner's local
 // project-catalog.json; keys in story-studio-config.json take precedence.
@@ -70,7 +80,7 @@ export function resolveStoryStudioConfig(input, catalog = []) {
   const extra = project.storyStudio && typeof project.storyStudio === 'object' && !Array.isArray(project.storyStudio) ? project.storyStudio : {};
   const merged = { ...input };
   if (merged.projectName === undefined) merged.projectName = extra.projectName ?? project.name;
-  for (const key of ['goal', 'focus', 'canon']) if (merged[key] === undefined && extra[key] !== undefined) merged[key] = extra[key];
+  for (const key of ['goal', 'focus', 'canon', 'intervalMs', 'geminiDailyLimit', 'language', 'writingInstructions']) if (merged[key] === undefined && extra[key] !== undefined) merged[key] = extra[key];
   return merged;
 }
 export function readStoryStudioConfig(home = process.env.AI_OFFICE_HOME || path.join(homedir(), '.ai-office')) {

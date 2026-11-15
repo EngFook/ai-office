@@ -295,3 +295,21 @@ test('continuous duty and huddle start while report inference is still pending',
   assert.equal(board.runtime.running.length, 0); assert.equal(modelCalls, 1);
   release(); await eventually(async () => (await read()).workReportsSummary.phase === 'ready');
 });
+
+
+test('configured Qwen services respect prerequisite IDs from the selected private data directory', async t => {
+  const home = await mkdtemp(path.join(tmpdir(), 'office-configured-gates-'));
+  await writeFile(path.join(home, 'qwen-prerequisites.json'), JSON.stringify({ watch: ['waiting-for-watch-setup'], workReports: ['waiting-for-reports-setup'] }));
+  const configuration = validateOfficeConfig({ mode: 'enabled', dataDir: home, workspace: home, providers: { 'local-qwen': { enabled: true } } });
+  let calls = 0, middleware;
+  const qwenClient = { enabled: true, model: 'fixture', runtimeState: () => ({ busy: false }), probe: async () => ({ available: false }), run: async () => { calls++; throw new Error('Prerequisite missing'); }, extractWorkReport: async () => { calls++; throw new Error('Prerequisite missing'); } };
+  const plugin = officeServices({ configuration, qwenClient, runner: { probeProviders: async () => ({}) } });
+  const server = createServer((req, res) => middleware(req, res, () => { res.statusCode = 404; res.end(); }));
+  plugin.configureServer({ httpServer: server, middlewares: { use(fn) { middleware = fn; } } });
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await plugin.closeBundle(); await rm(home, { recursive: true, force: true }); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  await eventually(async () => (await fetch(base + '/api/office/board').then(r => r.json())).qwenWatch?.phase === 'waiting');
+  const reports = await fetch(base + '/api/office/work-reports').then(r => r.json());
+  assert.equal(reports.phase, 'waiting'); assert.equal(calls, 0);
+});

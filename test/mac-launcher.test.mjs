@@ -6,7 +6,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
-import { ensureOffice, probeOffice } from '../scripts/mac-launcher.mjs';
+import { ensureOffice, probeOffice, launcherEnvironment } from '../scripts/mac-launcher.mjs';
 
 const run = promisify(execFile);
 const launcherModule = new URL('../scripts/mac-launcher.mjs', import.meta.url).href;
@@ -37,11 +37,11 @@ test('冷启动跨进程只启动一次，等待真实就绪；启动服务在�
   const reservation = createServer();
   const url = await listen(reservation);
   await new Promise(resolve => reservation.close(resolve));
-  const config = { url, stateDir: path.join(root, 'state'), projectPath: root, nodePath: process.execPath, path: path.join(root, 'custom cli') };
+  const config = { url, stateDir: path.join(root, 'state'), projectPath: root, nodePath: process.execPath, path: path.join(root, 'custom cli'), environment: { AI_OFFICE_HOME: path.join(root, 'private office'), AI_OFFICE_CONFIG: path.join(root, 'private config.json') } };
   const viteDir = path.join(root, 'node_modules/vite/bin');
   await mkdir(viteDir, { recursive: true });
   await writeFile(path.join(root, 'package.json'), '{"type":"module"}');
-  await writeFile(path.join(viteDir, 'vite.js'), `import {createServer} from 'node:http';import {appendFileSync,writeFileSync} from 'node:fs';\nappendFileSync('starts.txt','start\\n');writeFileSync('service.pid',String(process.pid));\nwriteFileSync('service-path.txt',process.env.PATH);let ready=false;setTimeout(()=>ready=true,400);createServer((req,res)=>{if(!ready){res.writeHead(503);res.end('starting');return;}res.setHeader('Content-Type','application/json');res.end(${JSON.stringify(JSON.stringify(office))})}).listen(Number(process.argv[process.argv.indexOf('--port')+1]),'127.0.0.1');`);
+  await writeFile(path.join(viteDir, 'vite.js'), `import {createServer} from 'node:http';import {appendFileSync,writeFileSync} from 'node:fs';\nappendFileSync('starts.txt','start\\n');writeFileSync('service.pid',String(process.pid));\nwriteFileSync('service-path.txt',process.env.PATH);writeFileSync('service-office.json',JSON.stringify({AI_OFFICE_HOME:process.env.AI_OFFICE_HOME,AI_OFFICE_CONFIG:process.env.AI_OFFICE_CONFIG}));let ready=false;setTimeout(()=>ready=true,400);createServer((req,res)=>{if(!ready){res.writeHead(503);res.end('starting');return;}res.setHeader('Content-Type','application/json');res.end(${JSON.stringify(JSON.stringify(office))})}).listen(Number(process.argv[process.argv.indexOf('--port')+1]),'127.0.0.1');`);
   t.after(async () => {
     const pid = Number(await readFile(path.join(root, 'service.pid'), 'utf8').catch(() => 0));
     if (pid) { try { process.kill(pid, 'SIGTERM'); } catch {} }
@@ -56,6 +56,7 @@ test('冷启动跨进程只启动一次，等待真实就绪；启动服务在�
   assert.equal(await readFile(path.join(root, 'starts.txt'), 'utf8'), 'start\n');
   assert.ok((await readFile(path.join(root, 'service-path.txt'), 'utf8')).split(':').includes(config.path));
   assert.equal(await probeOffice(url), 'ready');
+  assert.deepEqual(JSON.parse(await readFile(path.join(root, 'service-office.json'), 'utf8')), config.environment);
   await run('/usr/bin/lockf', ['-k', '-t', '0', path.join(config.stateDir, 'startup.lock'), '/usr/bin/true']);
   assert.equal((await ensureOffice(config)).started, false);
 });
@@ -88,4 +89,12 @@ test('missing registered service cannot fall through to launching an independent
   const root = await mkdtemp(path.join(os.tmpdir(), 'office-launch-agent-')); t.after(() => rm(root, { recursive: true, force: true }));
   const reservation = createServer(); const url = await listen(reservation); await new Promise(resolve => reservation.close(resolve));
   await assert.rejects(ensureOffice({ url, stateDir: root, projectPath: root, nodePath: process.execPath, launchAgent: 'local.ai-office.test-service-does-not-exist' }), /registered office service could not start/);
+});
+
+
+test('saved launcher configuration preserves office selectors without accepting stored credentials', () => {
+  const saved = { AI_OFFICE_HOME: '/chosen/private data', AI_OFFICE_CONFIG: '/chosen/custom.json', AI_OFFICE_MODE: 'read-only' };
+  assert.deepEqual(launcherEnvironment(saved, { PATH: '/bin', AI_OFFICE_HOME: '/wrong' }), { PATH: '/bin', ...saved });
+  assert.throws(() => launcherEnvironment({ API_KEY: 'not-a-saved-secret' }, {}), /Invalid saved office/);
+  assert.throws(() => launcherEnvironment({ AI_OFFICE_HOME: 'bad\npath' }, {}), /Invalid saved office/);
 });

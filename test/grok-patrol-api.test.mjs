@@ -51,7 +51,7 @@ test('Grok patrol board status and CLI read/write roundtrip retain task version 
   assert.equal(listed.roundId, 'round-fixture');
   assert.equal(listed.tasks[0].id, blocked.id);
   assert.equal(listed.tasks[0].version, blocked.version);
-  assert.deepEqual(f.requests.at(-1), { method: 'GET', url: '/api/office/grok/blocked-tasks' });
+  assert.deepEqual(f.requests.at(-1), { method: 'POST', url: '/api/office/grok/blocked-tasks/read' });
   const input = { source: 'grok-bot', version: blocked.version, roundId: listed.roundId, action: 'follow_up', summary: 'Inspecting the existing failure.', evidence: 'Synthetic fixture only.' };
   const result = await f.run(['handle-blocked-task', blocked.id], input);
   assert.deepEqual(result, { accepted: true, taskId: blocked.id, action: input.action });
@@ -126,4 +126,24 @@ test('Grok patrol config requires explicit versioned ten-minute enablement and f
   assert.deepEqual(readGrokPatrolConfig(home), { enabled: true, intervalMs: 600000 });
   await writeFile(file, JSON.stringify({ ...enabled, enabled: false }));
   assert.deepEqual(readGrokPatrolConfig(home), { enabled: false, intervalMs: 600000 });
+});
+
+test('queue preview is read-only and only a protected Bot POST can register a read', async t => {
+  const reads = [], f = await fixture(t, { getBlockedTasks: input => { reads.push(input); return { tasks: [] }; } });
+  assert.equal((await fetch(`${f.base}/api/office/grok/blocked-tasks`)).status, 200);
+  assert.deepEqual(reads, [{ recordRead: false }]);
+  const post = (input, token) => fetch(`${f.base}/api/office/grok/blocked-tasks/read`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: f.base, ...(token ? { 'X-Office-Token': token } : {}) }, body: JSON.stringify(input) });
+  assert.equal((await post({ source: 'grok-bot' })).status, 403);
+  const token = (await f.board()).csrfToken;
+  assert.equal((await post({ source: 'office-ui' }, token)).status, 400);
+  assert.equal((await post({ source: 'grok-bot', arbitrary: true }, token)).status, 400);
+  assert.equal(reads.length, 1);
+  assert.equal((await post({ source: 'grok-bot' }, token)).status, 200);
+  assert.deepEqual(reads.at(-1), { recordRead: true });
+  assert.equal(relayUserRouteAllowed('POST', '/api/office/grok/blocked-tasks/read'), false);
+  for (const options of [{ readOnly: true }, { enabledProviders: ['codex'] }]) {
+    const disabled = await fixture(t, { ...options, getBlockedTasks: () => assert.fail('must not record a read') });
+    const response = await fetch(`${disabled.base}/api/office/grok/blocked-tasks/read`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: disabled.base, 'X-Office-Token': (await disabled.board()).csrfToken }, body: JSON.stringify({ source: 'grok-bot' }) });
+    assert.equal(response.status, options.readOnly ? 403 : 503);
+  }
 });

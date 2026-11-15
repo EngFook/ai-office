@@ -60,7 +60,7 @@ test('real store claims launch bounded CLI work without shell interpolation, pri
   await runner.start();
   assert.equal(calls.length, 1);
   const { child, args, options } = calls[0];
-  assert.deepEqual(args, ['exec', '--json', '-c', 'agents.enabled=true', '-c', 'agents.max_concurrent_threads_per_session=2', '-c', 'model_reasoning_effort="high"', '--dangerously-bypass-approvals-and-sandbox', '-C', project, '-']);
+  assert.deepEqual(args, ['exec', '--json', '--skip-git-repo-check', '-c', 'agents.enabled=true', '-c', 'agents.max_concurrent_threads_per_session=2', '-c', 'model_reasoning_effort="high"', '--dangerously-bypass-approvals-and-sandbox', '-C', project, '-']);
   assert.equal(options.shell, false);
   assert.equal(options.cwd, project);
   assert.equal(options.detached, process.platform !== 'win32');

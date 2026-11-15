@@ -61,7 +61,6 @@ export async function runOfficeBoardCommand({ args = process.argv.slice(2), envi
     if (!response.ok) throw new Error(`Office request failed (${response.status}): ${typeof value.error === 'string' ? value.error.slice(0, 240) : 'request rejected'}`);
     return value;
   };
-  if (command === 'blocked-tasks') return request('grok/blocked-tasks');
   if (command === 'pending-reports') return request('daily-reports/pending');
   const board = await request('board');
   if (command === 'grok-quota') return writeGrokQuota(await readInput(), environment);
@@ -69,6 +68,7 @@ export async function runOfficeBoardCommand({ args = process.argv.slice(2), envi
   if (command === 'pending-questions') return { ...(board.grokPatrol?.enabled ? { blockedPatrol: { ...board.grokPatrol, userInstruction: '此办公室已启用 Grok 受阻巡检：按配置周期查看全部受阻任务并处理。每次唤醒同时用 blocked-tasks 读取当前巡检轮次；按当前 allowedActions 和候选负责人回写 handle-blocked-task，不把人审或额度等待当成已解决。无新结果保持静默，只有需要用户资料或批准的问题经现有流程转告。' } } : {}), workflowVersion: 2, userWorkflowInstruction: '需要你补资料或批准的才交给 Grok 处理，处理不了才转告。所有受阻任务需要我补充或确认的，给我把问题标出来，让我可以在对话框里打字，或者点击什么按键确认或拒绝，也给我加一个重新请求按钮。', handlingPolicy: 'Current office workflow replaces relay-only handling. Grok investigates first using existing records and authorization. For pending questions and delivered info questions not yet triaged, inspect the original task and available records once, without repeating delivered questions. Use triage-question REQUEST_ID with stdin JSON {"source":"grok-bot","questionHash":"CURRENT","outcome":"needs_user","summary":"FINDINGS","evidence":"CHECKS"}. resolved_info may requeue an information-only task; needs_user records what could not be resolved, then relay the specific question. Never invent user replies or approvals. Only acknowledge after actual delivery; answer-question requires the actual user reply.', humanRequests: (Array.isArray(board.humanRequests) ? board.humanRequests : []).filter(item => ['pending', 'delivered'].includes(item.state)) };
   if (command === 'pending-instructions') return { instructions: (Array.isArray(board.instructions) ? board.instructions : []).filter(instruction => instruction.status === 'pending') };
   if (typeof board.csrfToken !== 'string' || !board.csrfToken) throw new Error('The local office did not provide a request token.');
+  if (command === 'blocked-tasks') return request('grok/blocked-tasks/read', { source: 'grok-bot' }, board.csrfToken);
   const input = await readInput();
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Standard input must contain a JSON object.');
   if (command === 'acknowledge-report' && (input.source !== 'grok-bot' || typeof input.reportHash !== 'string' || !/^[a-f0-9]{64}$/.test(input.reportHash)

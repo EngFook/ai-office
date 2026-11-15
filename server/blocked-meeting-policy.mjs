@@ -6,10 +6,10 @@ const normalize = value => String(value || '').trim().replace(/\b\d{4}-\d\d-\d\d
   .replace(/\b[0-9a-f]{8}-[0-9a-f-]{27,}\b/gi, '<id>').replace(/\b(?:session|worker|request)[_-]?(?:id)?\s*[:=]\s*\S+/gi, '<session>').replace(/\s+/g, ' ');
 // Versions and timestamps are delivery metadata, never a new blocking point.
 // A shared concrete error/result in the same project gets one consultation.
-export const meetingScope = task => createHash('sha256').update(JSON.stringify([task.title, task.description, task.provider, task.role, task.projectPath])).digest('hex');
+export const meetingScope = task => createHash('sha256').update(JSON.stringify([task.title, task.description, task.provider, task.role, task.projectPath, ...(task.contextProjectPath ? [{ contextProjectPath: task.contextProjectPath }] : [])])).digest('hex');
 export function blockingKey(task) {
   const detail = normalize([task.error, task.result].filter(Boolean).join('\n')) || normalize([task.title, task.description].join('\n'));
-  return createHash('sha256').update(JSON.stringify([task.projectPath, detail])).digest('hex');
+  return createHash('sha256').update(JSON.stringify([task.projectPath, detail, ...(task.contextProjectPath ? [{ contextProjectPath: task.contextProjectPath }] : [])])).digest('hex');
 }
 export const meetingBlocked = task => task.status === 'blocked' && !reviewWorkHold(task) && !watchHoldReason(task);
 export function meetingBarrierAllows(task, record, retryAvailable = true) {

@@ -22,4 +22,8 @@ export function codexTier(remaining) {
 export const PRE_REVIEW_SUFFIX = ':prereview';
 // Gemini does research only: it never reviews or pre-reviews. Kept as a no-op for old callers.
 export function preReviewTaskFor() { return null; }
-export const isReviewLike = task => (task?.kind === 'review') || /^(Pre-review|Review)\s*:/i.test(String(task?.title || '')) || /:(pre)?review$/.test(String(task?.id || ''));
+// The story editor's research-kind stage uses a :review suffix too; this is a
+// literary assessment, not the software independent-review approval gate.
+export const isStoryStudioStage = task => task?.kind === 'research' && /^story:[^:]+:(research|review)$/.test(String(task?.id || ''));
+export const isReviewLike = task => (task?.kind === 'review') || Boolean(task?.reviewOf) || /^(Pre-review|Review)\s*:/i.test(String(task?.title || ''))
+  || (!isStoryStudioStage(task) && /:(pre)?review$/.test(String(task?.id || '')));

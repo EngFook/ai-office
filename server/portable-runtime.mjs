@@ -1,10 +1,11 @@
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync, mkdirSync, openSync, closeSync, writeFileSync, readFileSync, unlinkSync, mkdtempSync, copyFileSync, statSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, openSync, closeSync, writeFileSync, readFileSync, unlinkSync, mkdtempSync, copyFileSync, statSync, lstatSync, chmodSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { taskBoardBridge } from './task-board-bridge.mjs';
 import { publicOfficeConfig } from './office-config.mjs';
+import { readProjectCatalog } from './project-catalog.mjs';
 
 export function readonlyStore(dataDir) {
   const filename = path.join(dataDir, 'board.sqlite');
@@ -38,20 +39,71 @@ export function readonlyStore(dataDir) {
   } };
 }
 
-// A stale lock fails closed: verify the old process exited before removing it.
+const lockError = () => new Error('此数据目录已有运行锁，或旧锁无法安全验证。请先停止原办公室；损坏的锁须人工检查。');
+
+// The gate is held only while changing ownership. SQLite releases it on crash,
+// so two new processes cannot both replace the same verified-dead owner.
+function withOfficeLockGate(dataDir, action) {
+  const filename = path.join(dataDir, 'office-runner-gate.sqlite');
+  let db, transaction = false;
+  try {
+    for (const suffix of ['', '-journal', '-wal', '-shm']) {
+      try {
+        const stat = lstatSync(filename + suffix);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw lockError();
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    db = new DatabaseSync(filename); chmodSync(filename, 0o600);
+    db.exec('PRAGMA busy_timeout=1000; BEGIN IMMEDIATE'); transaction = true;
+    const result = action();
+    db.exec('COMMIT'); transaction = false;
+    return result;
+  } catch {
+    if (transaction) try { db.exec('ROLLBACK'); } catch {}
+    throw lockError();
+  } finally { db?.close(); }
+}
+
+function readOfficeLock(file) {
+  try {
+    const stat = lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 4096) throw lockError();
+    const owner = JSON.parse(readFileSync(file, 'utf8'));
+    if (!Number.isSafeInteger(owner.pid) || owner.pid < 1 || typeof owner.token !== 'string' || !/^[a-f0-9-]{36}$/i.test(owner.token)) throw lockError();
+    return owner;
+  } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
+
+// Recovery requires a well-formed owner whose PID is proven absent. Age, an
+// inaccessible process and PID reuse never authorize replacing a live owner.
 export function acquireOfficeLock(dataDir) {
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const file = path.join(dataDir, 'office-runner.lock'), token = randomUUID();
-  let fd;
-  try { fd = openSync(file, 'wx', 0o600); }
-  catch (error) { if (error.code === 'EEXIST') throw new Error('此数据目录已有运行锁。请先停止原办公室；异常退出后确认旧进程已结束，再移除 office-runner.lock。'); throw error; }
-  try { writeFileSync(fd, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() })); }
-  finally { closeSync(fd); }
+  withOfficeLockGate(dataDir, () => {
+    const owner = readOfficeLock(file);
+    if (owner) {
+      let exited = false;
+      try { process.kill(owner.pid, 0); } catch (error) { if (error.code === 'ESRCH') exited = true; }
+      if (!exited) throw lockError();
+      unlinkSync(file);
+    }
+    // Exclusive creation also respects older office/migration processes that
+    // use this owner file but do not yet participate in the SQLite gate.
+    const fd = openSync(file, 'wx', 0o600);
+    try { writeFileSync(fd, JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() })); }
+    finally { closeSync(fd); }
+  });
   let released = false;
   const release = () => {
-    if (released) return; released = true;
+    if (released) return;
+    try {
+      withOfficeLockGate(dataDir, () => {
+        const owner = readOfficeLock(file);
+        if (owner?.pid === process.pid && owner.token === token) unlinkSync(file);
+      });
+    } catch { return; } // Keep the exit retry; never remove an uncertain owner.
+    released = true;
     process.removeListener('exit', release);
-    try { if (JSON.parse(readFileSync(file, 'utf8')).token === token) unlinkSync(file); } catch {}
   };
   process.once('exit', release);
   return release;
@@ -66,6 +118,7 @@ export function pausedOfficeServices(configuration) {
     }]));
     taskBoardBridge({ store, readOnly: true, configuration: publicOfficeConfig(configuration),
       meetingFile: path.join(configuration.dataDir, 'reports/meetings/live.json'),
+      getProjectCatalog: () => readProjectCatalog(configuration.dataDir),
       getRuntimeStatus: () => ({ started: false, running: [], agents: [], providers }),
     }).configureServer(server);
     server.httpServer?.once('close', () => store?.close());

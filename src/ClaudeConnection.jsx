@@ -60,10 +60,10 @@ export function AgentConnection({state, onDirectory, provider='Claude Code', flo
   const { confirmed: working, idle, waiting, recorded, unconfirmed } = officeExecutionCounts(state.error ? [] : live);
   const topics = state.skills.filter(skill=>skill.category !== 'router').length;
   return <section className="claude-connection" aria-label={`${provider} connection`}>
-    <div className="claude-connection__heading"><span className={`claude-signal${state.error ? ' is-offline' : state.hookInstalled || state.connected ? ' is-ready' : ''}`}><Radio size={17}/></span><div><span className="section-kicker">{t('Studio')} · {provider.toUpperCase()}</span><h3>{agentConnectionLabel(state,provider)}</h3></div><span className="claude-local">ON THIS MAC</span></div>
-    <div className="claude-metrics"><div><strong>{topics}</strong><span>{provider === 'Codex' ? 'AVAILABLE SKILLS' : 'GAME DEV SKILLS'}</span></div><div><strong>{state.error ? '—' : live.length}</strong><span>{provider.toUpperCase()} AGENTS</span></div></div>
+    <div className="claude-connection__heading"><span className={`claude-signal${state.error ? ' is-offline' : state.hookInstalled || state.connected ? ' is-ready' : ''}`}><Radio size={17}/></span><div><span className="section-kicker">{t('Studio')} · {provider.toUpperCase()}</span><h3>{agentConnectionLabel(state,provider)}</h3></div><span className="claude-local">ON THIS COMPUTER</span></div>
+    <div className="claude-metrics"><div><strong>{topics}</strong><span>AVAILABLE SKILLS</span></div><div><strong>{state.error ? '—' : live.length}</strong><span>{provider.toUpperCase()} AGENTS</span></div></div>
     <div className="claude-status-totals" aria-label={`${provider} agent status totals`}><span className="is-running"><i/>{working} Running</span>{recorded > 0 && <span>{recorded} activity records · unconfirmed</span>}{unconfirmed > 0 && <span>{unconfirmed} unconfirmed</span>}<span className="is-idle"><i/>{idle} Idle</span>{waiting > 0 && <span className="is-waiting"><i/>{waiting} Waiting</span>}</div>
-    <p>{state.error || (state.agents.some(agent=>agent.observed && agent.status !== 'offline') ? `${provider} sessions and subagents move to their desks while working, then return to their idle rooms.` : provider === 'Codex' ? 'Open a Codex task on this Mac to see its agents on this studio.' : state.hookInstalled ? 'Specialists are ready. Start a new Claude Code session or restart an existing session to send its activity to this studio.' : 'Run npm run connect:claude from the studio folder to connect Claude Code.')}</p>
+    <p>{state.error || (state.agents.some(agent=>agent.observed && agent.status !== 'offline') ? `${provider} sessions and subagents move to their desks while working, then return to their idle rooms.` : provider === 'Codex' ? 'Open a Codex task on this computer to see its agents in this studio.' : state.hookInstalled ? 'Specialists are ready. Start a new Claude Code session or restart an existing session to send its activity to this studio.' : 'Run npm run connect:claude from the studio folder to connect Claude Code.')}</p>
     <button className="text-link" onClick={onDirectory}>{provider === 'Codex' ? 'Browse Codex skills & agents' : 'Meet the Claude specialists'} <UsersRound size={15}/></button>
   </section>;
 }
@@ -145,7 +145,7 @@ export function AgentStatusPanel({agents, error, loading, onSelectAgent,provider
 export function SharedConnections({claude=EMPTY,codex=EMPTY,grok=EMPTY,qwen=EMPTY,onDirectory}) {
   const lang = useLang();
   const providers = [['codex','Codex',codex],['claude','Claude Code',claude],['grok','Grok',grok],['local-qwen','Local Qwen',qwen]];
-  return <section className="shared-connections" aria-label="Provider connections"><div className="shared-connections__heading"><Radio size={15}/><h3>Connections</h3><span>ON THIS MAC</span></div><div className="shared-connections__providers">{providers.map(([key,provider,state])=>{
+  return <section className="shared-connections" aria-label="Provider connections"><div className="shared-connections__heading"><Radio size={15}/><h3>Connections</h3><span>ON THIS COMPUTER</span></div><div className="shared-connections__providers">{providers.map(([key,provider,state])=>{
     const unavailable = state.error || state.metadataAvailable === false;
     // Apply the same identity validation, deduplication and observation rules as
     // the shared floor, rather than displaying raw source claims as work.

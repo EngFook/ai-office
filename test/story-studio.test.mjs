@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, writeFile, rm, rename, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, rename, symlink, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createTaskStore } from '../server/task-store.mjs';
@@ -44,14 +44,41 @@ async function fixture(t) {
   return f;
 }
 
-test('configuration is opt-in, project-scoped and fixed to six hours/eight cards', async t => {
+test('configuration is opt-in and project-scoped with compatible six-hour/eight-card defaults', async t => {
   const f = await fixture(t); assert.equal(readStoryStudioConfig(f.home).enabled, false);
+  const defaults = validateStoryStudioConfig(f.config); assert.equal(defaults.intervalMs, SIX_HOURS); assert.equal(defaults.geminiDailyLimit, 8);
+  assert.equal(defaults.language, '中文'); assert.match(defaults.writingInstructions, /600–1000字/);
   assert.throws(() => validateStoryStudioConfig({ ...f.config, projectId: '../escape' }));
   assert.throws(() => validateStoryStudioConfig({ ...f.config, projectId: undefined }), /projectId/);
   assert.throws(() => validateStoryStudioConfig({ ...f.config, canon: undefined }), /canon/);
   assert.throws(() => validateStoryStudioConfig({ ...f.config, intervalMs: 10 }));
   const s = f.make({ config: { version: 1, enabled: false } }); await s.start(); assert.equal(s.status().phase, 'disabled'); assert.equal(f.tasks().length, 0);
   await writeFile(path.join(f.home, 'story-studio-config.json'), '{'); assert.match(readStoryStudioConfig(f.home).error, /配置无效/);
+});
+
+test('story scheduling and writing preferences accept bounded project-specific values and reject invalid limits', async t => {
+  const f = await fixture(t);
+  const custom = validateStoryStudioConfig({ ...f.config, intervalMs: 900000, geminiDailyLimit: 3, language: 'English', writingInstructions: 'Write a concise stage play with three characters.' });
+  assert.equal(custom.intervalMs, 900000); assert.equal(custom.geminiDailyLimit, 3);
+  assert.equal(custom.language, 'English'); assert.equal(custom.writingInstructions, 'Write a concise stage play with three characters.');
+  assert.doesNotMatch(validateStoryStudioConfig({ ...f.config, language: '日本語' }).writingInstructions, /中文|汉字/);
+  for (const value of [0, 899999, 7 * 86400000 + 1, 900000.5, '900000']) assert.throws(() => validateStoryStudioConfig({ ...f.config, intervalMs: value }), /intervalMs/);
+  for (const value of [0, 49, 1.5, '8']) assert.throws(() => validateStoryStudioConfig({ ...f.config, geminiDailyLimit: value }), /geminiDailyLimit/);
+  for (const value of ['', 'x'.repeat(81), 'English\ncommands', {}]) assert.throws(() => validateStoryStudioConfig({ ...f.config, language: value }), /language/);
+  for (const value of ['', 'x'.repeat(1001), '剧'.repeat(700), 'bad\u0000text', []]) assert.throws(() => validateStoryStudioConfig({ ...f.config, writingInstructions: value }), /writingInstructions/);
+  assert.equal(validateStoryStudioConfig({ ...f.config, intervalMs: 7 * 86400000, geminiDailyLimit: 48 }).geminiDailyLimit, 48);
+});
+
+test('custom language, writing instructions and schedule are bound to a cycle and reach Gemini and Qwen', async t => {
+  const f = await fixture(t); f.config = { ...f.config, intervalMs: 900000, geminiDailyLimit: 3, language: 'English', writingInstructions: 'Write a concise stage play with three characters.' };
+  let seen; f.qwen.writeStory = async input => { seen = input; return 'Original candidate scene. '.repeat(25); };
+  const s = f.make(); await f.toDraft(s);
+  const payload = JSON.parse(f.tasks()[0].description); assert.equal(payload.language, 'English'); assert.equal(payload.writingInstructions, f.config.writingInstructions);
+  assert.equal(s.status().nextCycleAt, new Date(AT + 900000).toISOString()); assert.equal(s.status().geminiDailyLimit, 3);
+  await s.stop(); f.config.language = '日本語'; f.config.writingInstructions = '短い場面を書いてください。';
+  const resumed = f.make(); await resumed.start();
+  assert.match(seen.brief, /Output language: "English"/); assert.match(seen.brief, /three characters/);
+  assert.doesNotMatch(seen.brief, /中文|汉字/); assert.equal(resumed.status().language, 'English', 'a changed config applies to later cycles');
 });
 
 test('full verified cycle persists candidate outside canon, restarts safely, and rotates next focus after six hours', async t => {
@@ -88,6 +115,100 @@ test('public source failure is specific, cooled down and does not manufacture a 
   const f = await fixture(t); let verifies = 0; const s = f.make({ verifySource: async () => { verifies++; return false; } });
   await s.start(); await f.finish(f.tasks()[0], research()); await s.tick(); assert.match(s.status().error, /暂不可达/); await s.tick(); assert.equal(verifies, 1); assert.equal(f.tasks().length, 1); assert.equal(f.calls, 0);
   await s.stop(); const resumed = f.make({ verifySource: async () => { verifies++; return false; } }); await resumed.start(); assert.equal(verifies, 1);
+});
+
+test('two failed source checks request a bounded research repair with the old result and source binding preserved', async t => {
+  const f = await fixture(t); let accessible = false;
+  const s = f.make({ verifySource: async () => accessible });
+  await s.start(); const first = await f.finish(f.tasks()[0], research()); await s.tick();
+  assert.equal(f.tasks().length, 1);
+  f.now += 900000; await s.tick();
+  const replacement = f.tasks().find(task => task.status === 'pending'), payload = JSON.parse(replacement.description);
+  assert.equal(f.tasks().length, 2); assert.notEqual(replacement.id, first.id);
+  assert.equal(payload.sourceRepair.previousTaskId, first.id);
+  assert.deepEqual(payload.sourceRepair.unreachableSources, ['https://example.org/story']);
+  assert.equal(payload.sourceRepair.round, 1); assert.equal(payload.projectId, 'sample-novel');
+  assert.equal(replacement.contextProjectPath, await realpath(f.project));
+  assert.equal(f.tasks().find(task => task.id === first.id).result, first.result);
+  assert.equal(f.tasks().find(task => task.id === first.id).status, 'done');
+  const state = await f.state(); assert.equal(state.cycle.tasks.researchHistory1.id, first.id);
+  assert.equal(state.cycle.tasks.researchHistory1.resultHash, createHash('sha256').update(first.result).digest('hex'));
+  accessible = true; const recovered = research(); recovered.sources[0].url = 'https://example.org/replacement';
+  await f.finish(replacement, recovered); await s.tick(); assert.equal((await f.state()).cycle.stage, 'draft');
+  assert.equal(s.status().geminiCalls24h, 2); assert.equal(f.calls, 0);
+});
+
+test('source-repair failure counts, reserved IDs and accounting survive restart without duplicating requests', async t => {
+  const f = await fixture(t), unavailable = { verifySource: async () => false };
+  let s = f.make(unavailable); await s.start(); await f.finish(f.tasks()[0], research()); await s.tick(); await s.stop();
+  f.now += 900000; s = f.make(unavailable); await s.start();
+  const replacementId = s.status().currentTaskId; assert.equal(f.tasks().length, 2); assert.equal(s.status().geminiCalls24h, 2);
+  await s.stop();
+  // Simulate a crash after SQLite created the replacement but before the JSON
+  // journal acknowledged it. Its durable ID must recover that same card.
+  const state = await f.state(); state.cycle.tasks.research.created = false; state.geminiRequests.pop();
+  await writeFile(path.join(f.home, 'story-studio.json'), JSON.stringify(state));
+  s = f.make(unavailable); await s.start(); await s.tick();
+  assert.equal(s.status().currentTaskId, replacementId); assert.equal(f.tasks().length, 2);
+  assert.equal(s.status().geminiCalls24h, 2); assert.equal(f.wakes, 2);
+});
+
+test('source repair stops after two replacement rounds instead of generating unbounded cards or network retries', async t => {
+  const f = await fixture(t); let checks = 0;
+  const s = f.make({ verifySource: async () => { checks++; return false; } }); await s.start();
+  for (let round = 0; round < 3; round++) {
+    await f.finish(f.tasks().find(task => task.status === 'pending'), research());
+    await s.tick(); f.now += 900000; await s.tick();
+  }
+  assert.equal(f.tasks().length, 3); assert.equal(s.status().geminiCalls24h, 3);
+  assert.match(s.status().error, /2 轮补查/); assert.equal(checks, 6);
+  f.now += SIX_HOURS; await s.tick(); await s.tick(); assert.equal(checks, 6); assert.equal(f.tasks().length, 3);
+  await s.stop(); const resumed = f.make({ verifySource: async () => { checks++; return false; } }); await resumed.start();
+  assert.equal(checks, 6); assert.equal(f.tasks().length, 3);
+});
+
+test('source repair waits for workflow budget and quota, preserving the two-check result without repeat network work', async t => {
+  const f = await fixture(t); let checks = 0, exhausted = false;
+  const settings = { verifySource: async () => { checks++; return false; }, quotaReader: () => exhausted ? { gemini: { observedAt: f.now, windows: [{ name: 'daily', usedPercent: 100, remainingPercent: 0 }] } } : null };
+  let s = f.make(settings); await s.start(); await f.finish(f.tasks()[0], research()); await s.tick();
+  exhausted = true; f.now += 900000; await s.tick(); await s.tick();
+  assert.equal(checks, 2); assert.equal(f.tasks().length, 1); assert.match(s.status().reason, /额度/);
+  await s.stop(); const state = await f.state(); state.geminiRequests = Array(8).fill(new Date(f.now).toISOString());
+  await writeFile(path.join(f.home, 'story-studio.json'), JSON.stringify(state)); exhausted = false;
+  s = f.make(settings); await s.start(); await s.tick(); assert.equal(checks, 2); assert.equal(f.tasks().length, 1);
+  assert.match(s.status().reason, /8 张/);
+  f.now += 86400001; await s.tick(); assert.equal(f.tasks().length, 2); assert.equal(checks, 2); assert.equal(s.status().geminiCalls24h, 1);
+});
+
+test('pause during the second failed source verification prevents a repair until the user resumes', async t => {
+  const f = await fixture(t); let second = false, release;
+  const s = f.make({ verifySource: async () => second ? new Promise(resolve => { release = resolve; }) : false });
+  await s.start(); await f.finish(f.tasks()[0], research()); await s.tick(); f.now += 900000; second = true;
+  const checking = s.tick(); await Promise.resolve(); f.store.updateSettings({ autoPickup: false }); release(false); await checking;
+  assert.equal(f.tasks().length, 1); assert.equal(s.status().phase, 'paused');
+  assert.equal((await f.state()).cycle.sourceValidation.failures, 1);
+  f.store.updateSettings({ autoPickup: true }); second = false; await s.tick(); assert.equal(f.tasks().length, 2);
+});
+
+test('deleting an earlier research card or changing a repair source blocks subsequent progression', async t => {
+  for (const change of ['delete-history', 'change-source']) {
+    const f = await fixture(t), s = f.make({ verifySource: async () => false });
+    await s.start(); const first = await f.finish(f.tasks()[0], research()); await s.tick(); f.now += 900000; await s.tick();
+    const replacement = f.tasks().find(task => task.status === 'pending');
+    if (change === 'delete-history') f.store.cardAction(first.id, { action: 'delete', version: first.version });
+    else { const other = path.join(f.home, 'other-source'); await mkdir(other); f.store.updateTask(replacement.id, { projectPath: other }); }
+    await s.tick(); assert.equal(f.tasks().length, change === 'delete-history' ? 1 : 2);
+    assert.equal(f.calls, 0); assert.equal(s.status().phase, 'paused');
+    assert.equal((await f.state()).cycle.stage, 'research');
+  }
+});
+
+test('canon changes during a failed source check never generate a repair with stale story instructions', async t => {
+  const f = await fixture(t); let second = false, release;
+  const s = f.make({ verifySource: async () => second ? new Promise(resolve => { release = resolve; }) : false });
+  await s.start(); await f.finish(f.tasks()[0], research()); await s.tick(); f.now += 900000; second = true;
+  const checking = s.tick(); await Promise.resolve(); await writeFile(path.join(f.project, 'notes/story-bible.md'), 'Changed canon'); release(false); await checking;
+  assert.equal(f.tasks().length, 1); assert.equal(f.calls, 0); assert.equal(s.status().phase, 'blocked');
 });
 
 test('manual completion, deletion and parked research stop the pipeline', async t => {
@@ -144,7 +265,7 @@ test('unsupported editorial evidence never triggers a revision', async t => {
 
 test('eight persisted story cards exhaust only this workflow budget until the rolling window clears', async t => {
   const f = await fixture(t); await writeFile(path.join(f.home, 'story-studio.json'), JSON.stringify({ version: 1, nextCycleAt: new Date(AT).toISOString(), geminiRequests: Array(8).fill(new Date(AT).toISOString()), cycle: null }));
-  const s = f.make(); await s.start(); assert.equal(f.tasks().length, 0); assert.match(s.status().reason, /八张/); f.now += 86400001; await s.tick(); assert.equal(f.tasks().length, 1);
+  const s = f.make(); await s.start(); assert.equal(f.tasks().length, 0); assert.match(s.status().reason, /8 张/); f.now += 86400001; await s.tick(); assert.equal(f.tasks().length, 1);
 });
 
 test('an existing live lock and malformed state fail closed', async t => {

@@ -12,4 +12,4 @@ export function watchHoldReason(task) {
   return null;
 }
 export const watchOwners = task => task.provider === 'any' ? ['claude', 'codex'] : [task.provider];
-export const watchFingerprint = task => createHash('sha256').update(JSON.stringify([task.id, task.provider, task.title, task.description, task.projectPath, task.error, task.result])).digest('hex');
+export const watchFingerprint = task => createHash('sha256').update(JSON.stringify([task.id, task.provider, task.title, task.description, task.projectPath, task.error, task.result, ...(task.contextProjectPath ? [{ contextProjectPath: task.contextProjectPath }] : [])])).digest('hex');

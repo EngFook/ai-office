@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mergePlan, parseArgs, runningCount } from '../scripts/merge-when-idle.mjs';
+import path from 'node:path';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { defaultBackupRoot, mergePlan, parseArgs, runningCount } from '../scripts/merge-when-idle.mjs';
 
 test('running count uses the larger of task status and runtime', () => {
   assert.equal(runningCount({ tasks: [{ status: 'running' }, { status: 'pending' }], runtime: { running: [] } }), 1);
@@ -32,4 +35,21 @@ test('idle gate drains watch decisions as well as board workers and rejects malf
   assert.equal(runningCount({ tasks: [], runtime: { running: [], watchDecisions: ['codex'] } }), 1);
   assert.equal(runningCount({ tasks: [{ status: 'running' }], runtime: { running: [{}], watchDecisions: ['codex', 'gemini'] } }), 3);
   assert.throws(() => runningCount({ tasks: [], runtime: { running: [], watchDecisions: 'unknown' } }), /unavailable/);
+});
+
+test('backup root comes from env or the office data directory, not a fixed personal folder', () => {
+  const home = path.resolve('/fixture/home');
+  assert.equal(defaultBackupRoot({ AI_OFFICE_BACKUP_DIR: '/fixture/backups' }, home), path.resolve('/fixture/backups'));
+  assert.equal(defaultBackupRoot({ AI_OFFICE_HOME: '/fixture/office' }, home), path.join(path.resolve('/fixture/office'), 'backups'));
+  assert.equal(defaultBackupRoot({}, home), path.join(home, '.ai-office', 'backups'));
+});
+
+
+test('backup defaults follow a custom configuration data directory without an office-home override', t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'office-backup-config-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const config = path.join(root, 'settings.json');
+  writeFileSync(config, JSON.stringify({ dataDir: './private-data' }));
+  assert.equal(defaultBackupRoot({ AI_OFFICE_CONFIG: config }, root), path.join(root, 'private-data', 'backups'));
+  assert.equal(defaultBackupRoot({ AI_OFFICE_CONFIG: config, AI_OFFICE_HOME: path.join(root, 'override') }, root), path.join(root, 'override', 'backups'));
 });

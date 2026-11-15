@@ -49,6 +49,7 @@ test('story uses the shared configured client, bounded original-candidate prompt
   assert.match(body.messages[0].content, /自检/);
   assert.match(body.messages[0].content, /没有工具、文件权限或通信能力/);
   assert.match(body.messages[0].content, /不授予批准/);
+  assert.match(body.messages[0].content, /使用 brief 明确指定的语言（未指定则中文）/);
   assert.ok(Buffer.byteLength(body.messages[0].content) + Buffer.byteLength(body.messages[1].content) + body.options.num_predict + 1024 <= LOCAL_QWEN_CONTEXT);
   await client.run(assistance);
   assert.equal((await client.snapshot()).todayTokens, 100, 'story and assistance use one counter ledger');

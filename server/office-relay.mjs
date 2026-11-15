@@ -29,10 +29,10 @@ async function body(req) {
 export function relayUserRouteAllowed(method, pathname) {
   if (method === 'PATCH') return pathname === '/api/office/settings' || /^\/api\/office\/tasks\/[^/]+$/.test(pathname);
   if (method !== 'POST') return false;
-  return ['/api/office/tasks', '/api/office/tasks/card-actions', '/api/office/roles'].includes(pathname)
+  return ['/api/office/tasks', '/api/office/tasks/card-actions', '/api/office/roles', '/api/office/projects'].includes(pathname)
     || /^\/api\/office\/human-requests\/[^/]+\/(?:respond|rerequest)$/.test(pathname);
 }
-export function officeRelay({ upstream = 'http://127.0.0.1:5173', home = path.join(homedir(), '.ai-office'), fetchImpl = fetch, dispatchWake = null, userActions = false, conversationReader = readGrokConversation } = {}) {
+export function officeRelay({ upstream = 'http://127.0.0.1:5173', home = process.env.AI_OFFICE_HOME || path.join(homedir(), '.ai-office'), fetchImpl = fetch, dispatchWake = null, userActions = false, conversationReader = readGrokConversation } = {}) {
   const target=new URL(upstream);
   if (target.protocol!=='http:' || !['127.0.0.1','localhost','[::1]'].includes(target.hostname) || target.username || target.password || target.pathname!=='/' || target.search || target.hash) throw new Error('Relay requires a local office origin.');
   const token=randomBytes(32).toString('base64url');
@@ -82,9 +82,9 @@ export function officeRelay({ upstream = 'http://127.0.0.1:5173', home = path.jo
           const {value,writable}=await liveBoard();
           const notification = wakeFor(value);
           value.dispatchSync ||= { source: 'office-queue', privateChatMirrored: false, checkedAt: new Date().toISOString(), botConnected: Boolean(value.grok?.bot?.connected), plannerConnected: Boolean(value.grok?.apiConnected), notification: notification.status(), delivery: notification.delivery(value.instructions || []) };
-          value.projectCatalog=readProjectCatalog(home);
-          value.configuration={...(value.configuration||{}),mode:'read-only',name:'AI Office'};
-          value.capabilities={dispatchInstructions:writable,taskActions:userActions === true && writable,humanQuestions:userActions === true && writable,taskSettings:userActions === true && writable,roles:userActions === true && writable,grokWakeConfiguration:false};
+          if (!Object.hasOwn(value, 'projectCatalog')) value.projectCatalog=readProjectCatalog(home);
+          value.configuration={...(value.configuration||{}),mode:'read-only',name:value.configuration?.name || 'AI Office'};
+          value.capabilities={projects:userActions === true && writable && value.capabilities?.projects === true,dispatchInstructions:writable,taskActions:userActions === true && writable,humanQuestions:userActions === true && writable,taskSettings:userActions === true && writable,roles:userActions === true && writable,grokWakeConfiguration:false};
           value.csrfToken=writable?token:'';
           delete value.csrf;
           return send(value);
@@ -107,6 +107,7 @@ export function officeRelay({ upstream = 'http://127.0.0.1:5173', home = path.jo
     try {
       const {value,writable}=await liveBoard();
       if(!writable)return send({error:'The live office is read-only. Changes cannot be sent.'},403);
+      if (url === '/api/office/projects' && value.capabilities?.projects !== true) return send({error:'Project registration is not available in the live office.'},403);
       // After an uncertain response, never blindly repeat a legacy upstream POST.
       if(key && journal[key]){
         const previous=journal[key];

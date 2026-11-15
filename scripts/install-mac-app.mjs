@@ -4,10 +4,11 @@ import { mkdirSync, mkdtempSync, writeFileSync, copyFileSync, existsSync, rename
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { loadOfficeConfig } from '../server/office-config.mjs';
 
 // The shortcut is local to this installation; no account or runtime data is bundled.
 const args = process.argv.slice(2), positional = [];
-let url = 'http://127.0.0.1:5173/', launchAgent;
+let url = process.env.AI_OFFICE_URL || 'http://127.0.0.1:5173/', launchAgent;
 for (let index = 0; index < args.length; index++) {
   const arg = args[index];
   if (arg === '--url' && args[index + 1]) url = args[++index];
@@ -23,6 +24,11 @@ if (launchAgent && !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(launchAgent)) throw new 
 if (Number(process.versions.node.split('.')[0]) < 24) throw new Error('需要 Node.js 24 或更新版本。');
 const projectPath = realpathSync(projectArgument);
 if (!existsSync(path.join(projectPath, 'node_modules/vite/bin/vite.js')) || !existsSync(path.join(projectPath, 'server/office-services.mjs'))) throw new Error('目标不是已安装依赖的 AI Office 项目。');
+const configuration = loadOfficeConfig({ cwd: projectPath });
+// Finder does not inherit the installation shell: persist only non-secret office selectors.
+const environment = { AI_OFFICE_CONFIG: configuration.configPath, AI_OFFICE_HOME: configuration.dataDir,
+  ...(process.env.AI_OFFICE_WORKSPACE ? { AI_OFFICE_WORKSPACE: configuration.workspace } : {}),
+  ...(process.env.AI_OFFICE_MODE ? { AI_OFFICE_MODE: configuration.mode } : {}) };
 const destination = path.resolve(destinationArgument);
 if (!destination.endsWith('.app')) throw new Error('目标必须以 .app 结尾。');
 if (existsSync(destination)) throw new Error(`已存在 ${destination}；为避免覆盖，先手动移走旧版 app。`);
@@ -37,7 +43,7 @@ try {
   writeFileSync(sourcePath, source);
   execFileSync('/usr/bin/osacompile', ['-o', app, sourcePath]);
   const resources = path.join(app, 'Contents/Resources');
-  const config = { projectPath, nodePath: process.execPath, path: [process.env.PATH, path.join(os.homedir(), '.local/bin'), path.join(os.homedir(), '.npm-global/bin'), path.join(os.homedir(), '.bun/bin')].filter(Boolean).join(':'), url, ...(launchAgent ? { launchAgent } : {}), stateDir: path.join(os.homedir(), 'Library/Application Support/AI Office') };
+  const config = { projectPath, nodePath: process.execPath, path: [process.env.PATH, path.join(os.homedir(), '.local/bin'), path.join(os.homedir(), '.npm-global/bin'), path.join(os.homedir(), '.bun/bin')].filter(Boolean).join(':'), url, ...(launchAgent ? { launchAgent } : {}), environment, stateDir: path.join(configuration.dataDir, 'launcher') };
   copyFileSync(fileURLToPath(new URL('./mac-launcher.mjs', import.meta.url)), path.join(resources, 'mac-launcher.mjs'));
   writeFileSync(path.join(resources, 'config.json'), JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
   // Finder has no interactive shell PATH. Prefer the install-time Node and then

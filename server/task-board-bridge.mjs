@@ -64,7 +64,7 @@ function workLogStatus(value) {
   };
 }
 
-export function taskBoardBridge({ store, onInstruction, onTaskChange, getRuntimeStatus, getProjectCatalog, getDispatchStatus, getWatchStatus, getHuddleStatus, getWorkReports, getStoryStudio, getGrokPatrol, getBlockedTasks, onHandleBlockedTask, getDailyReports, getPendingReports, onAcknowledgeReport, onConfigureGrok, getGrokStatus, onBotHeartbeat, onAgentHeartbeat, grokWake, onWakeConfigured, readOnly = false, configuration, meetingFile, enabledProviders, defaultProjectPath, conversationReader = readGrokConversation } = {}) {
+export function taskBoardBridge({ store, onInstruction, onTaskChange, getRuntimeStatus, getProjectCatalog, onCreateProject, getDispatchStatus, getWatchStatus, getHuddleStatus, getWorkReports, getStoryStudio, getGrokPatrol, getBlockedTasks, onHandleBlockedTask, getDailyReports, getPendingReports, onAcknowledgeReport, onConfigureGrok, getGrokStatus, onBotHeartbeat, onAgentHeartbeat, grokWake, onWakeConfigured, readOnly = false, configuration, meetingFile, enabledProviders, defaultProjectPath, conversationReader = readGrokConversation } = {}) {
   if (!store) throw new TypeError('taskBoardBridge requires a store.');
   const csrfToken = randomBytes(32).toString('base64url');
   const safely = async (callback, fallback) => { try { return callback ? await callback() : fallback; } catch { return fallback; } };
@@ -95,11 +95,11 @@ export function taskBoardBridge({ store, onInstruction, onTaskChange, getRuntime
         const [runtime, grok, workReports] = await Promise.all([safely(getRuntimeStatus, { available: false }), safely(getGrokStatus, { connected: false, configured: false }), safely(getWorkReports, null)]);
         const logSummary = workLogStatus(workReports?.logSummary);
         const workReportsSummary = workReports ? { ...(logSummary ? { logSummary } : {}), phase: workReports.phase, started: workReports.started, model: workReports.model || null, intervalMs: workReports.intervalMs, nextCheckAt: workReports.nextCheckAt || null, error: workReports.error || null, notice: workReports.notice || null, generatedAt: workReports.generatedAt || null, lastCheckedAt: workReports.lastCheckedAt || null, counts: workReports.counts || { totalLogs: workReports.runningLogs?.length || 0, totalTasks: workReports.allTasks?.length ?? (workReports.providers || []).reduce((sum, group) => sum + (group.tasks?.length || 0), 0) } } : null;
-        send({ ...store.snapshot(), storyStudio: await safely(getStoryStudio, null), grokPatrol: await safely(getGrokPatrol, null), dailyReport: await safely(getDailyReports, null), dispatchSync: await safely(getDispatchStatus, null), projectCatalog: await safely(getProjectCatalog, []), runtime, grok, grokWake: grokWake?.status() || { configured: false, host: null, lastSentAt: null, error: null }, qwenWatch: await safely(getWatchStatus, null), huddle: await safely(getHuddleStatus, null), ...(workReportsSummary ? { workReportsSummary } : {}), meeting: readMeeting(meetingFile), ...(configuration ? { configuration } : {}), csrfToken }); return;
+        send({ ...store.snapshot(), capabilities: { projects: !readOnly && Boolean(onCreateProject) }, storyStudio: await safely(getStoryStudio, null), grokPatrol: await safely(getGrokPatrol, null), dailyReport: await safely(getDailyReports, null), dispatchSync: await safely(getDispatchStatus, null), projectCatalog: await safely(getProjectCatalog, []), runtime, grok, grokWake: grokWake?.status() || { configured: false, host: null, lastSentAt: null, error: null }, qwenWatch: await safely(getWatchStatus, null), huddle: await safely(getHuddleStatus, null), ...(workReportsSummary ? { workReportsSummary } : {}), meeting: readMeeting(meetingFile), ...(configuration ? { configuration } : {}), csrfToken }); return;
       }
       if (request.method === 'GET' && pathname === '/api/office/grok/blocked-tasks') {
         if (!getBlockedTasks) throw httpError('Grok blocked-task patrol unavailable.', 503);
-        try { send(await getBlockedTasks()); } catch (error) { if ([400, 409, 503].includes(error?.status)) throw httpError(error.message, error.status); throw error; }
+        try { send(await getBlockedTasks({ recordRead: false })); } catch (error) { if ([400, 409, 503].includes(error?.status)) throw httpError(error.message, error.status); throw error; }
         return;
       }
       if (request.method === 'GET' && pathname === '/api/office/daily-reports') { send(await safely(getDailyReports, { enabled: false, phase: 'unavailable', error: '日报服务不可用。' })); return; }
@@ -116,7 +116,25 @@ export function taskBoardBridge({ store, onInstruction, onTaskChange, getRuntime
         const requested = worker.providers || [worker.provider];
         if (!Array.isArray(requested) || requested.some(id => !enabledProviders.includes(id))) throw httpError('该执行者尚未在本机配置中启用。', 403);
       }
-      if (defaultProjectPath && ['/api/office/tasks', '/api/office/instructions'].includes(pathname) && !input.projectPath) input.projectPath = defaultProjectPath;
+      if (defaultProjectPath && ['/api/office/tasks', '/api/office/instructions'].includes(pathname) && input.projectPath == null) input.projectPath = defaultProjectPath;
+      if (request.method === 'POST' && pathname === '/api/office/grok/blocked-tasks/read') {
+        if (!getBlockedTasks || enabledProviders && !enabledProviders.includes('grok-bot')) throw httpError('Grok blocked-task patrol unavailable.', 503);
+        if (input.source !== 'grok-bot' || Object.keys(input).some(key => key !== 'source')) throw httpError('A Bot read acknowledgement is required.', 400);
+        try { send(await getBlockedTasks({ recordRead: true })); }
+        catch (error) { if ([400, 409, 503].includes(error?.status)) throw httpError(error.message, error.status); throw error; }
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/api/office/projects') {
+        if (!onCreateProject) throw httpError('Project registration is unavailable in this office.', 503);
+        try {
+          const result = await onCreateProject(input);
+          send({ ...result, projectCatalog: await safely(getProjectCatalog, []) }, result.created ? 201 : 200);
+        } catch (error) {
+          if ([400, 409, 503].includes(error?.statusCode)) throw httpError(error.message, error.statusCode);
+          throw error;
+        }
+        return;
+      }
       let match;
       if (request.method === 'POST' && (match = pathname.match(/^\/api\/office\/grok\/blocked-tasks\/([^/]+)\/handle$/))) {
         if (!onHandleBlockedTask || enabledProviders && !enabledProviders.includes('grok-bot')) throw httpError('Grok blocked-task patrol unavailable.', 503);

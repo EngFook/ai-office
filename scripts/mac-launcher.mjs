@@ -36,7 +36,15 @@ export async function probeOffice(value) {
   return await portOccupied(url) ? 'occupied' : 'absent';
 }
 
-async function startService({ projectPath, nodePath, url, stateDir, path: configPath, launchAgent }) {
+// Keep a Finder launch bound to the same private configuration selected at install time.
+// Never allow arbitrary secrets or unrelated shell settings in the saved app configuration.
+export function launcherEnvironment(officeEnvironment = {}, env = process.env) {
+  const allowed = ['AI_OFFICE_CONFIG', 'AI_OFFICE_HOME', 'AI_OFFICE_WORKSPACE', 'AI_OFFICE_MODE'];
+  if (!officeEnvironment || typeof officeEnvironment !== 'object' || Array.isArray(officeEnvironment) || Object.entries(officeEnvironment).some(([key, value]) => !allowed.includes(key) || typeof value !== 'string' || !value || /[\x00-\x1f\x7f]/.test(value))) throw new Error('Invalid saved office environment.');
+  return { ...env, ...officeEnvironment };
+}
+
+async function startService({ projectPath, nodePath, url, stateDir, path: configPath, launchAgent, environment = {} }) {
   if (launchAgent) {
     if (process.platform !== 'darwin' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(launchAgent)) throw new Error('无效的本机后台服务名称 / Invalid local service label.');
     // Reuse the registered service without stopping it or spawning a second
@@ -51,7 +59,7 @@ async function startService({ projectPath, nodePath, url, stateDir, path: config
   try {
     const child = spawn(nodePath, [vite, '--host', '127.0.0.1', '--port', officeURL(url).port || '80', '--strictPort'], {
       cwd: projectPath,
-      env: { ...process.env, PATH: [path.dirname(nodePath), configPath, process.env.PATH, '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'].filter(Boolean).join(':') },
+      env: { ...launcherEnvironment(environment), PATH: [path.dirname(nodePath), configPath, process.env.PATH, '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'].filter(Boolean).join(':') },
       detached: true,
       stdio: ['ignore', log.fd, log.fd],
     });

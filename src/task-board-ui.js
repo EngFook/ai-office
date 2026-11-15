@@ -6,20 +6,21 @@ const providerNames = { claude: 'Claude Code', codex: 'Codex', gemini: 'Gemini',
 // groups approved aliases for display only; execution paths stay unchanged.
 export function taskProjectPath(path) {
   const value = String(path || '').trim()
-  return value.replace(/\/+$/, '') || (value.startsWith('/') ? '/' : '')
+  const normalized = /^(?:[a-z]:[\\/]|\\\\)/i.test(value) ? value.replace(/\\/g, '/') : value
+  return normalized.replace(/\/+$/, '') || (normalized.startsWith('/') ? '/' : '')
 }
 function catalogProject(folder, catalog = []) {
   return catalog.flatMap(project => [project.path, ...(project.folders || [])].filter(Boolean).map(root => ({ project, root:taskProjectPath(root) })))
-    .filter(({root}) => folder === root || folder.startsWith(`${root}/`)).sort((a,b)=>b.root.length-a.root.length)[0]?.project
+    .filter(({root}) => folder === root || folder.startsWith(root.endsWith('/') ? root : `${root}/`)).sort((a,b)=>b.root.length-a.root.length)[0]?.project
 }
-export function taskProjectKey(path, catalog = []) { const folder=taskProjectPath(path); return catalogProject(folder,catalog)?.path || folder }
+export function taskProjectKey(path, catalog = []) { const folder=taskProjectPath(path); return taskProjectPath(catalogProject(folder,catalog)?.path) || folder }
 export function taskProjectName(path) {
   const normalized = taskProjectPath(path)
   return normalized.split(/[\\/]/).filter(Boolean).pop() || (normalized ? '/' : 'Needs project folder')
 }
 // Use the same supplied-text rules as pickup; a missing folder alone is not a blocker.
 export function taskProjectDisplay(task = {}) {
-  const path = taskProjectPath(task.projectPath)
+  const path = taskProjectPath(task.contextProjectPath || task.projectPath)
   const textOnly = !path && task.provider === 'local-qwen' && !localQwenTaskError(task)
   return {
     textOnly, needsProject: !path && !textOnly,
@@ -27,18 +28,25 @@ export function taskProjectDisplay(task = {}) {
     detail: textOnly ? 'Text-only assistance' : path || 'Needs project folder before pickup',
   }
 }
-export function taskProjects(tasks, catalog = []) {
-  if (catalog.length) return catalog.map(project => {
-    const matched=tasks.filter(task=>catalogProject(taskProjectPath(task.projectPath),catalog)?.id===project.id)
-    return { key:project.path, path:project.path, name:project.name, count:matched.length, folders:[...new Set([project.path,...matched.map(task=>taskProjectPath(task.projectPath))])] }
-  })
+export function taskProjects(tasks = [], catalog = []) {
   const projects = new Map()
-  for (const task of tasks) {
-    const folder = taskProjectPath(task.projectPath)
-    if (!projects.has(folder)) projects.set(folder, { key:folder, name:taskProjectName(folder), count:0, path:folder, folders:[folder] })
-    projects.get(folder).count++
+  // Registered projects are visible even before their first task. Keep other
+  // task folders accessible too: a catalog is a grouping, not a visibility gate.
+  for (const project of catalog) {
+    const folder = taskProjectPath(project.path)
+    if (!folder || projects.has(folder)) continue
+    projects.set(folder, { key: folder, path: folder, name: project.name || taskProjectName(folder), count: 0, folders: [...new Set([folder, ...(project.folders || []).map(taskProjectPath).filter(Boolean)])] })
   }
-  const withoutFolder = tasks.filter(task => !taskProjectPath(task.projectPath))
+  for (const task of tasks) {
+    const folder = taskProjectPath(task.contextProjectPath || task.projectPath)
+    const registered = catalogProject(folder, catalog)
+    const key = registered ? taskProjectPath(registered.path) : folder
+    if (!projects.has(key)) projects.set(key, { key, name: taskProjectName(folder), count: 0, path: folder, folders: [folder] })
+    const project = projects.get(key)
+    project.count++
+    if (!project.folders.includes(folder)) project.folders.push(folder)
+  }
+  const withoutFolder = tasks.filter(task => !taskProjectPath(task.contextProjectPath || task.projectPath))
   if (withoutFolder.some(task => taskProjectDisplay(task).textOnly)) {
     projects.get('').name = withoutFolder.every(task => taskProjectDisplay(task).textOnly) ? 'Text-only assistance' : 'No project folder'
   }
@@ -47,7 +55,7 @@ export function taskProjects(tasks, catalog = []) {
 
 export function filterBoardTasks(tasks, { projectPath = null, provider = 'all', status = 'all', catalog = [] } = {}) {
   const projectKey = projectPath === null ? null : taskProjectKey(projectPath,catalog)
-  return tasks.filter(task => (status === 'all' || task.status === status) && (projectKey === null || taskProjectKey(task.projectPath,catalog) === projectKey) &&
+  return tasks.filter(task => (status === 'all' || task.status === status) && (projectKey === null || taskProjectKey(task.contextProjectPath || task.projectPath,catalog) === projectKey) &&
     (provider === 'all' || task.provider === provider || provider !== 'any' && task.assignee?.provider === provider))
 }
 

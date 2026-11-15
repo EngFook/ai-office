@@ -111,21 +111,21 @@ export function createGrokBlockedPatrol({ store, home = process.env.AI_OFFICE_HO
     if (resolutionPaused(task)) return { mode: 'follow_up', candidates: [], reason: '用户暂停或已停用，不能自动恢复。' };
     return assessBlockedTask(task, current.board, current.runtime, current.quota, now(), providerConcurrency, configuration);
   }
-  function pending() {
+  function pending({ recordRead = true } = {}) {
     available();
     if (!state?.cycle || now() >= Date.parse(state.nextCheckAt)) return { cycleId: null, nextCheckAt: state?.nextCheckAt || null, tasks: [] };
     const current = facts(), tasks = current.board.tasks.filter(task => task.status === 'blocked').map(task => {
       const assessed = assessment(task, current), fingerprint = watchFingerprint(task);
       const human = current.board.humanRequests?.find(item => item.id === task.humanGate?.requestId && ['pending', 'delivered'].includes(item.state));
-      state.cycle.readBindings[task.id] = { version: task.version, fingerprint };
+      if (recordRead) state.cycle.readBindings[task.id] = { version: task.version, fingerprint };
       const candidates = (assessed.candidates || []).map(item => ({ ...item, reason: redactSecrets(item.reason, 1000) }));
       return { id: task.id, version: task.version, fingerprint, title: redactSecrets(task.title, 240), description: redactSecrets(task.description, 6000),
         error: redactSecrets(task.error, 2000), result: redactSecrets(task.result, 4000), role: redactSecrets(task.role, 100), provider: task.provider,
-        projectPath: redactSecrets(task.projectPath, 4000), mode: assessed.mode, reason: redactSecrets(assessed.reason, 2000), candidates,
+        projectPath: redactSecrets(task.projectPath, 4000), ...(task.contextProjectPath ? { contextProjectPath: redactSecrets(task.contextProjectPath, 4000) } : {}), mode: assessed.mode, reason: redactSecrets(assessed.reason, 2000), candidates,
         allowedActions: ['wait', ...(candidates.length && assessed.mode === 'investigate' ? ['investigate'] : candidates.length && assessed.mode === 'dispatch' ? ['retry'] : [])],
         humanRequestId: human?.id || null, handled: !!state.cycle.handled[task.id] };
     });
-    state.blockedCount = tasks.length; state.lastReadAt = iso(now()); persist();
+    if (recordRead) { state.blockedCount = tasks.length; state.lastReadAt = iso(now()); persist(); }
     return { cycleId: state.cycle.id, createdAt: state.cycle.createdAt, nextCheckAt: state.nextCheckAt, tasks };
   }
   async function handle(id, input = {}) {

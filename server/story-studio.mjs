@@ -6,12 +6,13 @@ import { isIP } from 'node:net';
 import { request as httpsRequest } from 'node:https';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { readStoryStudioConfig, validateStoryStudioConfig } from './story-studio-config.mjs';
+import { readStoryStudioConfig, validateStoryStudioConfig, STORY_STUDIO_DEFAULT_LANGUAGE, STORY_STUDIO_DEFAULT_WRITING } from './story-studio-config.mjs';
 import { resolutionPaused } from './resolution-policy.mjs';
 import { humanRequestHold } from './human-relay-policy.mjs';
 import { quotaFresh, validQuotaUsed } from '../src/usage-utils.js';
 
 const DAY = 86400000, COOLDOWN = 15 * 60000, POLL = 30000;
+const MAX_SOURCE_REPAIRS = 2;
 const STAGES = ['research', 'draft', 'review', 'revise', 'complete'];
 const NAMES = { research: 'Gemini：资料研究与原创选题', draft: 'Qwen：撰写候选场景', review: 'Gemini：剧情编辑评议', revise: 'Qwen：按具体意见修订', complete: '候选稿已保存，等待下一轮' };
 const iso = value => new Date(value).toISOString();
@@ -53,6 +54,9 @@ function validState(value) {
   if (!value || value.version !== 1 || !stamp(value.nextCycleAt) || !Array.isArray(value.geminiRequests) || value.geminiRequests.length > 100 || value.geminiRequests.some(at => !stamp(at))) fail('Invalid story state');
   const cycle = value.cycle;
   if (cycle && (!/^[a-f0-9-]{36}$/.test(cycle.id) || !STAGES.includes(cycle.stage) || !stamp(cycle.createdAt) || !Array.isArray(cycle.sourceManifest) || typeof cycle.canon !== 'string' || bytes(cycle.canon) > 8000 || !cycle.attempts || typeof cycle.attempts !== 'object' || !cycle.tasks || typeof cycle.tasks !== 'object')) fail('Invalid story cycle');
+  if (cycle?.researchRepairRound != null && (!Number.isInteger(cycle.researchRepairRound) || cycle.researchRepairRound < 0 || cycle.researchRepairRound > MAX_SOURCE_REPAIRS)) fail('Invalid research repair round');
+  if (cycle?.sourceValidation && (!Number.isInteger(cycle.sourceValidation.failures) || cycle.sourceValidation.failures < 1 || cycle.sourceValidation.failures > 2 || typeof cycle.sourceValidation.taskId !== 'string' || typeof cycle.sourceValidation.resultHash !== 'string' || !Array.isArray(cycle.sourceValidation.urls) || cycle.sourceValidation.urls.length > 6)) fail('Invalid source validation state');
+  if (cycle?.writing && (typeof cycle.writing.language !== 'string' || cycle.writing.language.length > 80 || typeof cycle.writing.instructions !== 'string' || bytes(cycle.writing.instructions) > 2000)) fail('Invalid story writing instructions');
   return value;
 }
 function captureSources(root, canonConfig) {
@@ -180,7 +184,7 @@ export function createStoryStudio({ store, home = process.env.AI_OFFICE_HOME || 
       nextCycleAt: state?.nextCycleAt || null, currentTaskId: ['research', 'review'].includes(c?.stage) ? currentTaskId() : null,
       lastCompletedAt: state?.lastCompletedAt || null, lastArtifact: state?.lastArtifact || null,
       draftPreview: clean(c?.revised || c?.draft || state?.lastPreview || '', 2000), error: storageError || error, reason,
-      geminiCalls24h: calls(), geminiDailyLimit: config.geminiDailyLimit, intervalMs: config.intervalMs, projectId: config.projectId, projectName: config.projectName };
+      geminiCalls24h: calls(), geminiDailyLimit: config.geminiDailyLimit, intervalMs: config.intervalMs, language: c?.writing?.language || config.language, projectId: config.projectId, projectName: config.projectName };
   };
   function persist() { try { state.phase = phase; state.reason = reason; state.error = error; privateWrite(stateFile, state); } catch { storageError = '剧情协作存储失败；停止推进并保留已有产物。'; throw new Error(storageError); } }
   function artifact(name, text) {
@@ -201,6 +205,7 @@ export function createStoryStudio({ store, home = process.env.AI_OFFICE_HOME || 
       if (link.created && !task) return '用户已移除本轮剧情卡，自动协作不会重建。';
       if (task && (resolutionPaused(task) || task.status === 'deleted' || humanRequestHold(task))) return '剧情卡已暂停、删除或等待用户回应；自动协作保持原状态。';
       if (task && (hash(task.description) !== link.inputHash || task.provider !== 'gemini' || task.kind !== 'research')) return '本轮剧情卡内容已改变，保留产物等待核对。';
+      if (task && Object.hasOwn(link, 'contextProjectPath') && (task.contextProjectPath || null) !== link.contextProjectPath) return '本轮剧情卡源项目已改变，保留产物等待核对。';
       if (task && link.resultHash && (task.status !== 'done' || task.completionSource !== 'agent' || hash(task.result) !== link.resultHash)) return '已使用的剧情阶段结果被改动，不能继续套用旧依据。';
     }
     return null;
@@ -216,14 +221,34 @@ export function createStoryStudio({ store, home = process.env.AI_OFFICE_HOME || 
     if ((runtime.running || []).some(job => job.provider === 'gemini' && !job.finished)) return 'Gemini 正在处理其他任务，本轮等待空闲。';
     const value = quota?.gemini;
     if (quotaFresh(value, 'Gemini', now()) && Array.isArray(value?.windows) && value.windows.some(win => validQuotaUsed(win) && (win.remainingPercent === 0 || win.usedPercent >= 100))) return 'Gemini 当前额度已耗尽，等待真实恢复。';
-    if (calls() >= config.geminiDailyLimit) return '已到本流程每日八张 Gemini 工作卡预算，等待滚动窗口恢复。';
+    if (calls() >= config.geminiDailyLimit) return `已到本流程每日 ${config.geminiDailyLimit} 张 Gemini 工作卡预算，等待滚动窗口恢复。`;
     return null;
   }
   function taskPayload(stage) {
     const c = cycle();
     return { officeWorkflow: 'story-studio-v1', stage: stage === 'review' ? 'story_review' : 'research', cycleId: c.id, projectId: config.projectId,
       goal: c.goal || config.goal, canon: c.canon, sourceManifest: c.sourceManifest,
+      ...(c.writing ? { language: c.writing.language, writingInstructions: c.writing.instructions } : {}),
+      ...(stage === 'research' && c.researchRepair ? { sourceRepair: c.researchRepair } : {}),
       ...(stage === 'review' ? { draft: c.draft, researchBrief: JSON.stringify({ ideas: c.research.ideas, outline: c.research.outline }) } : {}) };
+  }
+  async function repairResearchSources(task, runtime, quota) {
+    const c = cycle(), validation = c.sourceValidation;
+    if (!validation || validation.taskId !== task.id || validation.resultHash !== hash(task.result)) return hold('来源修复与当前研究结果不一致，保留原任务等待核对。');
+    const round = (c.researchRepairRound || 0) + 1;
+    if (round > MAX_SOURCE_REPAIRS) return hold(`公开来源经 ${MAX_SOURCE_REPAIRS} 轮补查仍无法验证，停止自动新建研究卡；请核对来源或调整研究范围。`);
+    const unavailable = readyForGemini(runtime, quota); if (unavailable) return hold(unavailable, 'waiting');
+    // Keep every old card and binding. A user pause/deletion on any stage still
+    // stops the workflow; a replacement is new research, never a rewritten done.
+    c.tasks[`researchHistory${round}`] = { ...c.tasks.research, resultHash: hash(task.result) };
+    c.researchRepairRound = round;
+    c.researchRepair = { round, previousTaskId: task.id, unreachableSources: validation.urls,
+      request: 'The office could not verify these public URLs on two checks. Find accessible public replacements and return a complete fresh research JSON with sources, ideas and outline. Do not merely repeat the same unavailable links or treat reachability as proof of the claimed content. Do not alter prior cards, canon, permissions or source-verification rules.' };
+    const expected = JSON.stringify(taskPayload('research'));
+    c.tasks.research = { id: `story:${c.id}:research-repair-${round}`, inputHash: hash(expected), created: false };
+    delete c.sourceValidation; delete c.cooldownUntil; delete c.cooldownReason;
+    persist(); // Stable ID and repair count precede task creation across crashes.
+    return geminiStage(store.snapshot({ recoverLeases: false }), runtime, quota);
   }
   async function geminiStage(board, runtime, quota) {
     const c = cycle(), stage = c.stage, expected = JSON.stringify(taskPayload(stage));
@@ -236,25 +261,44 @@ export function createStoryStudio({ store, home = process.env.AI_OFFICE_HOME || 
       if (link.inputHash !== hash(expected)) return hold('本轮研究请求的输入已改变，保留旧请求。');
       // Durable task ID first; restart reuses a created card instead of duplicating it.
       const created = store.createTask({ title: `${config.projectName}剧情·${stage === 'research' ? '资料与原创选题' : '编辑评议'}`, description: expected, provider: 'gemini', role: 'Helper', projectPath: config.projectPath, priority: 'normal' }, { id: link.id });
-      link.created = true; link.descriptionHash = hash(created.description); state.geminiRequests.push(iso(now())); persist();
+      link.created = true; link.contextProjectPath = created.contextProjectPath || null; link.descriptionHash = hash(created.description); state.geminiRequests.push(iso(now())); persist();
       try { await onTaskChange(); } catch { return hold('剧情卡已入队，但执行器唤醒失败；保留原卡，等待恢复。', 'unavailable'); }
       phase = stage === 'research' ? 'researching' : 'reviewing'; reason = '等待此阶段的真实执行结果。'; error = null; persist(); return status();
     }
-    if (!link.created) { link.created = true; link.descriptionHash = hash(task.description); if (!link.recoveredAt) { state.geminiRequests.push(iso(now())); link.recoveredAt = iso(now()); } persist(); }
+    if (task.contextProjectPath && task.contextProjectPath !== realpathSync(config.projectPath)) return hold('本轮剧情卡源项目不属于配置项目，保留任务等待核对。');
+    if (!link.created) { link.created = true; link.contextProjectPath = task.contextProjectPath || null; link.descriptionHash = hash(task.description); if (!link.recoveredAt) { state.geminiRequests.push(iso(now())); link.recoveredAt = iso(now()); } persist(); }
     if (hash(task.description) !== link.inputHash || task.provider !== 'gemini' || task.kind !== 'research') return hold('本轮研究卡已被修改，不使用改变后的内容继续自动写作。');
     if (resolutionPaused(task) || task.status === 'deleted' || humanRequestHold(task)) return hold('研究卡已暂停、删除或等待用户回应；自动协作保持原状态。', 'paused');
     if (task.status === 'blocked' || task.status === 'failed') return hold(`Gemini 本轮受阻：${clean(task.error || task.result, 600)}。原卡保留，不重复建卡。`);
     if (task.status !== 'done') { phase = stage === 'research' ? 'researching' : 'reviewing'; reason = task.status === 'running' ? 'Gemini 正在执行本轮任务。' : '此阶段排队中，尚未宣称完成。'; error = null; persist(); return status(); }
     if (task.completionSource !== 'agent') return hold('研究卡没有真实代理完成记录，手动完成不能代替可验证产物。');
     if (stage === 'research') {
-      const result = researchResult(taskResult(task), now()); controller = new AbortController();
-      try { for (const source of result.sources) if (!await verifySource(source.url, { signal: controller.signal })) fail(`公开来源暂不可达，等待核验：${source.url}。这不代表来源伪造；保留原研究。`); }
+      if (c.sourceValidation?.failures >= 2) return repairResearchSources(task, runtime, quota);
+      const result = researchResult(taskResult(task), now()), invalidSources = []; controller = new AbortController();
+      try {
+        for (const source of result.sources) {
+          try { if (!await verifySource(source.url, { signal: controller.signal })) invalidSources.push(source.url); }
+          catch { if (!controller.signal.aborted) invalidSources.push(source.url); }
+          if (controller.signal.aborted) break;
+        }
+      }
       finally { controller = null; }
       if (stopped) return status();
       const held = guard(); if (held) return hold(held, 'paused');
       currentSources();
       const freshTask = store.snapshot({ recoverLeases: false }).tasks.find(item => item.id === task.id);
       if (!freshTask || freshTask.version !== task.version || freshTask.result !== task.result) return hold('验证期间研究结果改变，保留记录并重新核对。');
+      if (invalidSources.length) {
+        const previous = c.sourceValidation;
+        const failures = previous?.taskId === task.id && previous.resultHash === hash(task.result) ? Math.min(2, previous.failures + 1) : 1;
+        c.sourceValidation = { taskId: task.id, resultHash: hash(task.result), failures, urls: invalidSources, checkedAt: iso(now()) };
+        link.resultHash = hash(task.result);
+        if (failures >= 2) { persist(); return repairResearchSources(task, runtime, quota); }
+        c.cooldownUntil = iso(now() + COOLDOWN);
+        c.cooldownReason = `公开来源暂不可达，十五分钟后再核验：${invalidSources.join('；')}。再次失败将请 Gemini 补查替代来源；保留原研究。`;
+        return hold(c.cooldownReason);
+      }
+      delete c.sourceValidation; delete c.cooldownUntil; delete c.cooldownReason;
       const brief = JSON.stringify({ idea: result.ideas[0], outline: result.outline });
       if (bytes(brief) > 3000) return hold('研究大纲超过单场写作预算，需缩短具体节拍，不能自动丢弃情节。');
       c.research = result; c.researchBrief = brief; c.researchHash = hash(task.result); artifact('01-research.json', JSON.stringify(result, null, 2)); c.stage = 'draft';
@@ -270,7 +314,13 @@ export function createStoryStudio({ store, home = process.env.AI_OFFICE_HOME || 
     const c = cycle(), stage = c.stage;
     if (!qwenClient?.writeStory) return hold('本地 Qwen 写作能力尚未接入。', 'unavailable');
     if (runtime.providers?.['local-qwen']?.available === false) return hold('本地 Qwen 当前不可用，保留阶段等待恢复。', 'waiting');
-    const brief = `${stage === 'draft' ? '按给定节拍写一场600–1000字的中文候选剧本。' : '依据编辑反馈定向修订这场候选剧本，不扩充未定的世界真相。'}保留人物行动、清楚冲突、具体代价、结尾钩子。正文加标记总长不超过2400汉字，不要输出点评代替正文。\n${c.researchBrief}`;
+    const writing = c.writing || { language: config.language, instructions: config.writingInstructions };
+    // Preserve the previous default prompt for resumable generation journals.
+    // Other projects select their language and brief in local configuration.
+    const defaultWriting = writing.language === STORY_STUDIO_DEFAULT_LANGUAGE && writing.instructions === STORY_STUDIO_DEFAULT_WRITING;
+    const direction = defaultWriting ? `${stage === 'draft' ? '按给定节拍写一场600–1000字的中文候选剧本。' : '依据编辑反馈定向修订这场候选剧本，不扩充未定的世界真相。'}保留人物行动、清楚冲突、具体代价、结尾钩子。正文加标记总长不超过2400汉字，不要输出点评代替正文。`
+      : `Output language: ${JSON.stringify(writing.language)}.\n${writing.instructions}\n${stage === 'revise' ? 'Revise the current candidate according to the supplied editorial feedback, preserving established canon.' : 'Write the actual candidate scene using the supplied outline.'} Keep the complete text, including its candidate label and self-check, within 8000 UTF-8 bytes.`;
+    const brief = `${direction}\n${c.researchBrief}`;
     const input = { brief, canon: c.canon, draft: stage === 'revise' ? c.draft : '', feedback: stage === 'revise' ? JSON.stringify(c.review) : '' };
     if (bytes(brief) > 4000 || bytes(JSON.stringify(input)) > 20000) return hold('完整写作输入超过预算；保留研究，需缩短本场节拍或反馈。');
     const inputHash = hash(input), journalFile = path.join(outputRoot, c.id, `${stage}-generation.json`);
@@ -279,7 +329,7 @@ export function createStoryStudio({ store, home = process.env.AI_OFFICE_HOME || 
     if (!generated) {
       if (qwenClient.runtimeState?.().busy || (board.tasks || []).some(task => task.provider === 'local-qwen' && task.status === 'running')) return hold('共享本地模型正在处理其他任务，候选写作等待空闲。', 'waiting');
       if ((c.attempts[stage] || 0) >= 2) return hold('本阶段已失败两次；保留已有稿件，需检查失败原因后再继续。');
-      phase = stage === 'draft' ? 'drafting' : 'revising'; error = null; reason = 'Qwen 正在生成候选稿，不会改写游戏正典。'; persist();
+      phase = stage === 'draft' ? 'drafting' : 'revising'; error = null; reason = 'Qwen 正在生成候选稿，不会改写项目正典。'; persist();
       controller = new AbortController(); activeWriting = true;
       try {
         const text = await qwenClient.writeStory({ ...input, projectName: config.projectName, signal: controller.signal });
@@ -312,11 +362,11 @@ export function createStoryStudio({ store, home = process.env.AI_OFFICE_HOME || 
     const board = store.snapshot({ recoverLeases: false });
     const held = guard(board); if (held) return hold(held, 'paused');
     if (!cycle() || cycle().stage === 'complete') {
-      if (now() < Date.parse(state.nextCycleAt)) { phase = cycle() ? 'ready' : 'waiting'; reason = '本轮已结束，等待六小时周期。'; error = null; persist(); return status(); }
+      if (now() < Date.parse(state.nextCycleAt)) { phase = cycle() ? 'ready' : 'waiting'; reason = '本轮已结束，等待配置的下一轮周期。'; error = null; persist(); return status(); }
       const source = captureSources(config.sourceRoot, config.canon);
       const sequence = (state.sequence || 0) + 1, focus = config.focus[(sequence - 1) % config.focus.length];
       const goal = `${config.goal}\n本轮创作重点：${focus}。以新的局部场景探索该角度，不反复改写上一轮；上一轮候选只是未确认创意，不能升级为正典。${state.lastPreview ? `\n上一轮候选节选：${state.lastPreview.slice(0, 500)}` : ''}`;
-      state.sequence = sequence; state.cycle = { id: randomUUID(), stage: 'research', createdAt: iso(now()), ...source, goal, focus, attempts: {}, tasks: {} };
+      state.sequence = sequence; state.cycle = { id: randomUUID(), stage: 'research', createdAt: iso(now()), ...source, goal, focus, writing: { language: config.language, instructions: config.writingInstructions }, attempts: {}, tasks: {} };
       state.nextCycleAt = iso(now() + config.intervalMs); persist(); artifact('00-sources.json', JSON.stringify({ ...source, goal }, null, 2));
     } else currentSources();
     if (cycle().cooldownUntil && now() < Date.parse(cycle().cooldownUntil)) return hold(cycle().cooldownReason || '验证或写作冷却中，保留上一次产物。', 'cooldown');

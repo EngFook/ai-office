@@ -23,6 +23,8 @@ If the browser does not open, copy the printed URL. If startup fails, run `npm r
 2. Sign into the provider CLI you selected. Claude/Codex can use their CLI subscription login. For Claude activity figures, also run `npm run connect:claude`, then restart Claude sessions. For a local model, start Ollama and choose a model already shown by `ollama list`. Gemini currently requires the Antigravity-compatible `agy` interface; a different `gemini` CLI is not interchangeable. Grok Bot instructions are under Dispatch. Restart the office with `npm start` after setup changes.
 3. Open Tasks, add a small request such as checking README typos, choose its folder/provider, and enable **Auto pickup**. Read the card's wait reason if it does not start. Code work requires an independent enabled and signed-in Claude/Codex reviewer; an author cannot approve its own review.
 
+Use **Projects → Add project** to register another existing directory, then open its board and add a request. Names and folders may contain spaces or Unicode; ordinary non-Git folders are supported too. Registration persists in the selected private data directory and does not change project files or start an agent. Tasks in unregistered folders remain visible. Gemini keeps the selected source project as read-only context and stores its research separately.
+
 The guide stays available above the office. Running agents and each reported subagent can be clicked to see their identity, parent, status and project. Idle agents are grouped. External frameworks must report lifecycle events to show their children; merely enabling a provider does not establish a live connection.
 
 **Common problems:**
@@ -37,7 +39,7 @@ The guide stays available above the office. Running agents and each reported sub
 
 ## Configuration and privacy
 
-Local settings live in `~/.ai-office/config.json`, outside Git. `AI_OFFICE_CONFIG` selects another settings file; `AI_OFFICE_HOME` selects private runtime data; `AI_OFFICE_WORKSPACE` selects a workspace. The default is `disabled` with providers and automatic pickup off. `disabled` and `read-only` do not start AI tasks or contact AI services. Credentials stay in provider login stores or supported environment variables, never in configuration JSON or Git.
+Local settings live in `~/.ai-office/config.json`, outside Git. `AI_OFFICE_CONFIG` selects another settings file; `AI_OFFICE_HOME` selects private runtime data; `AI_OFFICE_WORKSPACE` selects a workspace. Relative configuration paths and provider executable paths resolve from the settings file directory; setup paths resolve from the terminal directory. The macOS launcher retains the selected settings/data directory when opened from Finder. Daily schedules use the configured zone, environment override, system zone, then UTC. The default is `disabled` with providers and automatic pickup off. `disabled` and `read-only` do not start AI tasks or contact AI services. Credentials stay in provider login stores or supported environment variables, never in configuration JSON or Git.
 
 Board scheduling supports 1–8 workers each for Claude/Codex/Gemini, and 1 for Local Qwen/Grok Bot. An office that displays hundreds of external agents does not promise that many simultaneous scheduled workers. Independent coding jobs need separate worktrees. Supported routing and migration details are in the installation guide; preserve user-held task IDs before enabling migrated data.
 

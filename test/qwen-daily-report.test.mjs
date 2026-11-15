@@ -88,6 +88,52 @@ test('empty project scope never sends task content or falsely reports completed 
   assert.deepEqual(f.calls[0].source.tasks, []);
 });
 
+test('Gemini reports use registered source projects and exact aliases, with legacy output-directory fallback', async t => {
+  const f = await fixture(t);
+  f.scope = [{ name: 'Source project', path: '/projects/source', folders: ['/worktrees/source'] }, { name: 'Legacy research', path: '/private/research' }];
+  f.board.tasks = [
+    task({ id: 'source', provider: 'gemini', projectPath: '/private/research', contextProjectPath: '/projects/source' }),
+    task({ id: 'alias', provider: 'gemini', projectPath: '/private/research', contextProjectPath: '/worktrees/source' }),
+    task({ id: 'child', provider: 'gemini', projectPath: '/private/research', contextProjectPath: '/projects/source/unregistered-child', title: 'PRIVATE CHILD' }),
+    task({ id: 'legacy', provider: 'gemini', projectPath: '/private/research' }),
+  ];
+  await f.service.start(); f.at = DUE; await f.service.tick();
+  const source = f.calls[0].source;
+  assert.equal(source.counts.completed, 3); assert.equal(source.counts.outOfScope, 1);
+  assert.deepEqual(Object.fromEntries(source.tasks.map(row => [row.id, row.project])), { source: 'Source project', alias: 'Source project', legacy: 'Legacy research' });
+  assert.ok(!JSON.stringify(source).includes('PRIVATE CHILD'));
+});
+
+test('registered research output never admits an unregistered or invalid Gemini source or its questions', async t => {
+  const f = await fixture(t);
+  f.scope = ['/private/research'];
+  f.board.tasks = [
+    task({ id: 'outside', provider: 'gemini', projectPath: '/private/research', contextProjectPath: '/projects/private', title: 'PRIVATE SOURCE' }),
+    task({ id: 'relative', provider: 'gemini', projectPath: '/private/research', contextProjectPath: 'relative/project', title: 'PRIVATE RELATIVE' }),
+    task({ id: 'invalid', provider: 'gemini', projectPath: '/private/research', contextProjectPath: {}, title: 'PRIVATE INVALID' }),
+    task({ id: 'control', provider: 'gemini', projectPath: '/private/research', contextProjectPath: '/private/research\n', title: 'PRIVATE CONTROL' }),
+    task({ id: 'coder', provider: 'codex', projectPath: '/private/research', contextProjectPath: '/projects/private' }),
+  ];
+  f.board.humanRequests = [{ id: 'private-question', taskId: 'outside', state: 'pending', kind: 'info', question: 'PRIVATE QUESTION' }];
+  await f.service.start(); f.at = DUE; await f.service.tick();
+  const source = f.calls[0].source;
+  assert.equal(source.counts.completed, 1); assert.equal(source.counts.outOfScope, 4);
+  assert.equal(source.counts.needsUser, 0); assert.deepEqual(source.questions, []);
+  assert.deepEqual(source.tasks.map(row => row.id), ['coder']);
+  assert.ok(!JSON.stringify(source).includes('PRIVATE'));
+});
+
+test('removing a Gemini source project withholds its report even when research output remains allowed', async t => {
+  const f = await fixture(t);
+  f.scope = ['/projects/source', '/private/research'];
+  f.board.tasks = [task({ provider: 'gemini', projectPath: '/private/research', contextProjectPath: '/projects/source' })];
+  await f.service.start(); f.at = DUE; await f.service.tick();
+  assert.equal(f.service.pending().length, 1);
+  f.scope = ['/private/research'];
+  assert.equal(f.service.pending().length, 0); assert.equal(f.service.status().withheldCount, 1);
+  const previous = f.notices.length; await f.service.tick(); assert.equal(f.notices.length, previous);
+});
+
 test('source byte budget is bounded and omission counts remain visible', async t => {
   const f = await fixture(t);
   f.board.tasks = Array.from({ length: 120 }, (_, i) => task({ id: `task:${i}`, title: '中文标题'.repeat(40), result: '中文结果'.repeat(300) }));
@@ -180,8 +226,8 @@ test('daily report time zone comes from service config, office settings or AI_OF
   const { resolveOfficeTimeZone, FALLBACK_OFFICE_TIME_ZONE } = await import('../server/office-timezone.mjs');
   assert.equal(resolveOfficeTimeZone({ configured: 'Europe/Berlin', env: { AI_OFFICE_TIMEZONE: 'America/New_York' } }), 'Europe/Berlin');
   assert.equal(resolveOfficeTimeZone({ configured: undefined, env: { AI_OFFICE_TIMEZONE: 'America/New_York' } }), 'America/New_York');
-  assert.equal(resolveOfficeTimeZone({ configured: 'Not/AZone', env: { AI_OFFICE_TIMEZONE: 'also bad' } }), FALLBACK_OFFICE_TIME_ZONE);
-  assert.equal(resolveOfficeTimeZone({ env: {} }), FALLBACK_OFFICE_TIME_ZONE);
+  assert.equal(resolveOfficeTimeZone({ configured: 'Not/AZone', env: { AI_OFFICE_TIMEZONE: 'also bad' }, system: 'also bad' }), FALLBACK_OFFICE_TIME_ZONE);
+  assert.equal(resolveOfficeTimeZone({ env: {}, system: 'Asia/Tokyo' }), 'Asia/Tokyo');
 });
 
 test('office settings time zone is used when the daily report config omits it', async t => {

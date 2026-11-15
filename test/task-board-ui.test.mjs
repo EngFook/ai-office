@@ -71,11 +71,11 @@ test('blocked requests preserve full task data and identify assigned agents befo
   assert.equal(taskAgentProvider({ provider: 'any', assignee: 'gemini-research-2' }), 'gemini')
 })
 
-test('explicit project catalog groups declared worktrees and keeps only owner-approved projects',()=>{
+test('explicit project catalog groups declared worktrees without hiding other task folders',()=>{
  const catalog=[{id:'game',name:'Game',path:'/work/game',folders:['/tmp/game-lane']},{id:'office',name:'Office',path:'/work/office',folders:['/tmp/office-review']}];
  const tasks=[{id:'main',projectPath:'/work/game',status:'pending'},{id:'lane',projectPath:'/tmp/game-lane/reports',status:'blocked'},{id:'office',projectPath:'/tmp/office-review',status:'pending'},{id:'unknown',projectPath:'/unrelated',status:'done'},{id:'prefix',projectPath:'/tmp/game-lane-other',status:'done'}];
  const before=JSON.stringify(tasks);
- const projects=taskProjects(tasks,catalog);assert.equal(projects.length,2);assert.equal(projects[0].count,2);assert.equal(projects[1].count,1);
+ const projects=taskProjects(tasks,catalog);assert.equal(projects.length,4);assert.equal(projects.find(p=>p.path==='/work/game').count,2);assert.equal(projects.find(p=>p.path==='/work/office').count,1);assert.ok(projects.some(p=>p.path==='/unrelated'));assert.ok(projects.some(p=>p.path==='/tmp/game-lane-other'));
  assert.deepEqual(filterBoardTasks(tasks,{projectPath:'/work/game',catalog}).map(t=>t.id),['main','lane']);
  assert.deepEqual(filterBoardTasks(tasks,{projectPath:'/work/game',catalog,status:'blocked'}).map(t=>t.id),['lane']);
  assert.equal(JSON.stringify(tasks),before);

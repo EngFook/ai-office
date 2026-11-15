@@ -8,7 +8,9 @@
 
 ## 运行节奏
 
-每六小时最多开启一轮；剧情调度器每24小时最多新建八张 Gemini 工作卡（现有卡的手动或解阻重试另受执行器额度约束）、同一创作链同时最多一张 Gemini 卡。研究→Qwen 草稿→Gemini 审稿→Qwen 一次定向修订→保存候选。每轮一个有边界的场景，按配置的创作重点（`focus`）轮换，不无限续写。暂停、维护、额度不足、登录失效或失败时保留进度并冷却，不启动重复卡，也不自动开付费超额。
+默认每六小时最多开启一轮；剧情调度器每24小时最多新建八张 Gemini 工作卡。可以通过 `intervalMs` 和 `geminiDailyLimit` 调整周期与预算（现有卡的手动或解阻重试另受执行器额度约束），同一创作链同时最多一张 Gemini 卡。研究→Qwen 草稿→Gemini 审稿→Qwen 一次定向修订→保存候选。每轮一个有边界的场景，按配置的创作重点（`focus`）轮换，不无限续写。暂停、维护、额度不足、登录失效或失败时保留进度并冷却，不启动重复卡，也不自动开付费超额。
+
+公开来源暂时打不开时先等待十五分钟重查；同一结果再次无法验证，就创建一张带有失败 URL 和前次任务 ID 的补查卡，请 Gemini 提供可访问的替代来源。每轮最多补查两次，计入同一 Gemini 工作卡预算。旧任务、原文和输入绑定会保留；暂停、删除旧卡、改变源项目或正典都会阻止自动继续。达到补查上限后明确受阻，不再无期限查询同一坏链接。
 
 研究只读公开可访问的简介、试读、作者/出版社资料或评论等，记录来源与日期，提炼叙事方法；不下载或复制整本受版权保护小说。网络可达性检查只能确认来源能打开，不能证明模型解读准确。新点子必须贴合本轮已给定的项目设定，候选稿仍须核验和采纳。
 
@@ -24,6 +26,10 @@
   "projectName": "My Novel",
   "sourceRoot": "/absolute/path/to/my-novel",
   "projectPath": "/absolute/path/to/my-novel",
+  "intervalMs": 21600000,
+  "geminiDailyLimit": 8,
+  "language": "中文",
+  "writingInstructions": "按节拍写一场600–1000字的候选剧本，人物选择要有代价，保留未解谜题。",
   "goal": "为现有章节之后撰写可选的原创候选场景；保持人物动机与既定事实。",
   "focus": ["人物动机：选择与代价", "悬疑：可核对的线索"],
   "canon": {
@@ -40,8 +46,10 @@
 - `projectId`：字母、数字、`-`、`_`；候选稿保存在数据目录 `creative/<projectId>/`，不写回正典。`projectName` 只用于显示和提示词，缺省用 `project-catalog.json` 中同 ID 条目的 `name`，再缺省用 `projectId`。
 - `canon.sources[].path` 是相对 `sourceRoot` 的文件路径（每个 ≤512KB，不能跳出项目、不能是链接）。`mode`：`full` 整个文件、`lines` 只保留匹配 `patterns` 的行（可用 `minMatches`/`exactMatches` 校验格式）、`section` 取 `pattern` 的第一个捕获组、`none` 只参与哈希与校验。可选 `heading`、`join`、`requireText`、`versionPattern`（第一个捕获组为版本标签，可配 `minVersion` 对第二个捕获组（没有时用第一个）做数值下限检查）。拼接后的正典超过 8000 字节会拒绝，不静默截断。
 - `goal`、`focus`、`canon` 缺省时分别使用通用目标、通用创作重点；没有 `canon` 时不能启用。
+- `intervalMs`：新轮次间隔，允许15分钟至7天，默认6小时；`geminiDailyLimit`：滚动24小时新建卡预算，允许1–48张，默认8张。预算包括来源补查卡，不代表提供商无限额度。
+- `language`：候选稿语言名或语言代码，最长80字符，默认中文；`writingInstructions`：项目自己的体裁、长度、风格要求，最长1000字符且不超过2000 UTF-8字节。默认中文场景保持原来的600–1000字要求；选其他语言时使用通用短场景要求。单次完整候选仍不得超过8000 UTF-8字节，总输入仍受本地模型预算限制。当前轮次固定其写作要求，配置变化从下一轮开始生效。
 
-也可以把项目定义集中写在数据目录的 `project-catalog.json`：在对应项目条目中加 `storyStudio` 块（可含 `projectName`、`goal`、`focus`、`canon`），`story-studio-config.json` 只保留 `version`、`enabled`、`projectId` 和路径；条目的 `name` 作为显示名。`story-studio-config.json` 中的同名键优先。两份文件都在本机数据目录，不进入仓库。
+也可以把项目定义集中写在数据目录的 `project-catalog.json`：在对应项目条目中加 `storyStudio` 块（可含 `projectName`、`goal`、`focus`、`canon` 以及上述周期、预算、语言、写作要求），`story-studio-config.json` 只保留 `version`、`enabled`、`projectId` 和路径；条目的 `name` 作为显示名。`story-studio-config.json` 中的同名键优先。两份文件都在本机数据目录，不进入仓库。
 
 `sourceRoot` 必须指向最新剧情工作区，而不是较旧的另一份 checkout。每轮读取配置的正典来源并保存来源哈希；来源改变时保留候选稿并等待重新核对。
 

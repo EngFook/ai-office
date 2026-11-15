@@ -40,7 +40,8 @@ export function validateOfficeConfig(input = {}, { home = homedir(), cwd = proce
     const provider = entries[id] ?? {};
     keys(provider, ['enabled', 'command', 'model', 'concurrency'], `providers.${id}`);
     if (provider.enabled !== undefined && typeof provider.enabled !== 'boolean') fail(`${id}.enabled 必须是布尔值。`);
-    const command = provider.command === null ? null : text(provider.command ?? commands[id] ?? '', `${id}.command`, { empty: true });
+    const rawCommand = provider.command === null ? null : text(provider.command ?? commands[id] ?? '', `${id}.command`, { empty: true });
+    const command = rawCommand && (rawCommand === '~' || /[/\\]/.test(rawCommand)) ? resolveDirectory(rawCommand, `${id}.command`, baseDir, home) : rawCommand;
     const model = text(provider.model ?? '', `${id}.model`, { empty: true, max: 240 });
     const concurrency = provider.concurrency ?? 1;
     const maxConcurrency = id === 'local-qwen' || id === 'grok-bot' ? 1 : 8;

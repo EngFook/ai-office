@@ -1,6 +1,16 @@
 // UI dictionary: every entry is { en, zh }. {x} placeholders are kept verbatim between languages.
 // Brand/product names (Claude, Codex, Grok, Gemini, Claude Code, xAI, GitHub) are not translated.
 export const DICT = [
+  ['SESSION ONLY','仅当前会话'],
+  ['ON THIS COMPUTER','在本机'],
+  ['Open a Codex task on this computer to see its agents in this studio.','在运行办公室的电脑上打开 Codex 任务，即可在此工作室看到它的代理。'],
+  ['Connected on this computer','已连接本机'],
+  ['Grok Bot · This computer','Grok Bot · 本机'],
+  ['Connect with your own xAI API key to enable local planning. It is stored by the local server on this computer.','使用自己的 xAI API 密钥启用本地规划，密钥由运行办公室的电脑保存。'],
+  ['Use Grok Bot’s local-computer command prompt and approve the requested command. A cloud browser cannot open this computer’s localhost.','使用 Grok Bot 的本机命令入口并批准所需命令；云端浏览器无法访问运行办公室的电脑上的 localhost。'],
+  ['The local command interface is starting. Refresh to load this computer’s setup.','本地命令接口正在启动，刷新后查看此电脑的设置。'],
+
+  ['Add project','添加项目'],
   ['Task breakdown', '任务拆分'], ['Handoff summary', '交接摘要'], ['Blocker triage', '受阻排查建议'], ['Acceptance checklist', '验收清单草案'],
   ['Source limit: 20,000 characters or 24 KB of UTF-8 text, whichever comes first (about 8,000 Chinese characters).', '资料上限：20,000 字符或 24 KB UTF-8 文本，以先达到者为准（中文约 8,000 字）。'],
   ['Configured model unavailable', '配置模型不可用'],

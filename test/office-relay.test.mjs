@@ -79,3 +79,27 @@ test('relay preserves upstream delivery metadata and does not double notify a ne
  await new Promise(resolve=>setImmediate(resolve));
  assert.deepEqual((await f.call()).body.dispatchSync,f.state.dispatchSync);
 });
+
+test('relay preserves upstream office identity/catalog and gates project registration on current capability', async t => {
+ const f=await fixture(t,{userActions:true});
+ f.state.configuration.name='Custom Studio';
+ f.state.projectCatalog=[{id:'new',name:'New Project',path:'/custom/project',folders:[]}];
+ f.state.capabilities={projects:true};
+ const board=(await f.call()).body;
+ assert.equal(board.configuration.name,'Custom Studio');
+ assert.deepEqual(board.projectCatalog,f.state.projectCatalog);
+ assert.equal(board.capabilities.projects,true);
+ const options={headers:{'x-office-token':f.token}};
+ const request={name:'New',path:'/arbitrary/project'};
+ assert.equal((await f.call('/api/office/projects',request,options)).status,202);
+ assert.equal(f.posts(),1);
+ f.state.capabilities.projects=false;
+ assert.equal((await f.call('/api/office/projects',request,options)).status,403);
+ assert.equal(f.posts(),1);
+ assert.equal((await f.call()).body.capabilities.projects,false);
+ delete f.state.capabilities;
+ assert.equal((await f.call()).body.capabilities.projects,false);
+ const readonly=await fixture(t,{userActions:false});readonly.state.capabilities={projects:true};
+ assert.equal((await readonly.call()).body.capabilities.projects,false);
+ assert.equal((await readonly.call('/api/office/projects',request,{headers:{'x-office-token':readonly.token}})).status,403);
+});

@@ -95,7 +95,13 @@ function capture(store, allowedProjects, period, capturedAt) {
   const scope = projectScope(allowedProjects), tasks = [], outside = [];
   for (const task of board.tasks) {
     if (!task || !idText(task.id) || task.status === 'deleted') continue;
-    const folder = typeof task.projectPath === 'string' && path.isAbsolute(task.projectPath) ? path.normalize(task.projectPath) : null;
+    // Gemini writes into a private research directory, but its report belongs
+    // to the source project. Invalid explicit context must not fall back to an
+    // allowed output directory and expose an otherwise unregistered project.
+    const scopedProject = task.provider === 'gemini' && task.contextProjectPath != null && task.contextProjectPath !== ''
+      ? task.contextProjectPath : task.projectPath;
+    const folder = typeof scopedProject === 'string' && path.isAbsolute(scopedProject) && !/[\x00-\x1f]/.test(scopedProject)
+      ? path.normalize(scopedProject) : null;
     if (folder && scope.has(folder)) tasks.push({ task, folder }); else outside.push(task);
   }
   const from = Date.parse(period.startAt), to = Date.parse(period.endAt);

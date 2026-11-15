@@ -18,7 +18,7 @@ export async function startOffice(args = process.argv.slice(2)) {
   if (Number(process.versions.node.split('.')[0]) < 24) throw new Error('需要 Node.js 24+ / Node.js 24+ required. Install it, then run npm ci.');
   const options = startOptions(args);
   const root = path.resolve(import.meta.dirname, '..');
-  const configuration = loadOfficeConfig({ cwd: root });
+  const configuration = loadOfficeConfig();
   let createServer;
   try { ({ createServer } = await import('vite')); }
   catch { throw new Error('依赖尚未安装，请先运行 npm ci / Run npm ci first.'); }

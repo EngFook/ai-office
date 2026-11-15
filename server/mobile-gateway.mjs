@@ -14,10 +14,10 @@ form.onsubmit=e=>{e.preventDefault();enter()};const fragment=new URLSearchParams
 
 // The phone acts as the user, never as a worker, relay bot or credential manager.
 export function mobileRouteAllowed(method, pathname) {
-  if (['GET', 'HEAD'].includes(method)) return ['/api/office/board', '/api/office/human-requests', '/api/office/work-reports', '/api/grok/status', '/api/claude/status', '/api/codex/status', '/api/usage'].includes(pathname);
+  if (['GET', 'HEAD'].includes(method)) return ['/api/office/board', '/api/office/human-requests', '/api/office/work-reports', '/api/grok/status', '/api/claude/status', '/api/claude/workspace', '/api/codex/status', '/api/codex/workspace', '/api/usage'].includes(pathname);
   if (method === 'PATCH') return pathname === '/api/office/settings' || /^\/api\/office\/tasks\/[^/]+$/.test(pathname);
   if (method !== 'POST') return false;
-  return ['/api/office/tasks', '/api/office/tasks/card-actions', '/api/office/instructions'].includes(pathname)
+  return ['/api/office/tasks', '/api/office/tasks/card-actions', '/api/office/instructions', '/api/office/projects'].includes(pathname)
     || /^\/api\/office\/human-requests\/[^/]+\/(?:respond|rerequest)$/.test(pathname)
     || /^\/api\/office\/instructions\/[^/]+\/retry$/.test(pathname);
 }

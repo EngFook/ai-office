@@ -272,3 +272,29 @@ test('late successful wake does not hide a real runner dispatch failure', async 
   assert.equal(service.status().phase, 'unavailable'); assert.match(service.status().error, /执行器唤醒失败/);
   assert.equal(f.store.snapshot().tasks[0].status, 'pending');
 });
+
+test('preview does not acknowledge a Bot read or authorize task handling', async t => {
+  const f = await fixture(t), task = await f.block(), service = f.make(); await service.start();
+  const file = path.join(f.home, 'grok-blocked-patrol.json'), before = await readFile(file, 'utf8');
+  const page = service.pending({ recordRead: false }), item = page.tasks.find(item => item.id === task.id);
+  assert.equal(service.status().lastReadAt, null);
+  assert.equal(await readFile(file, 'utf8'), before);
+  const input = { source: 'grok-bot', cycleId: page.cycleId, version: item.version, fingerprint: item.fingerprint, action: 'wait', reason: 'Checking the current dependency failure.', evidence: 'Previewed the task state.' };
+  await assert.rejects(service.handle(task.id, input), /当前版本和指纹/);
+  service.pending({ recordRead: true });
+  assert.equal(service.status().lastReadAt, new Date(AT).toISOString());
+  assert.equal((await service.handle(task.id, input)).applied, false);
+});
+
+
+test('patrol research evidence keeps source project separate from its output directory', async t => {
+  const f = await fixture(t), source = path.join(f.home, 'source'); await mkdir(source);
+  const created = f.store.createTask({ title: 'Source research', provider: 'gemini', projectPath: source });
+  const claim = f.store.claimTask(worker(created.projectPath, 'gemini'), { taskId: created.id });
+  const task = f.store.finishTask(created.id, claim.claimToken, { status: 'blocked', error: 'Source dependency unavailable' });
+  const service = f.make(); await service.start();
+  const item = service.pending({ recordRead: false }).tasks.find(item => item.id === task.id);
+  assert.equal(item.contextProjectPath, task.contextProjectPath);
+  assert.equal(item.projectPath, task.projectPath);
+  assert.notEqual(item.contextProjectPath, item.projectPath);
+});

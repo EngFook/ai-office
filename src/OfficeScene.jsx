@@ -1,3 +1,4 @@
+import { browserStorage } from './browser-storage.js'
 import { crowdCapacity } from './crowd-capacity.js'
 import React, { Suspense, createContext, lazy, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
@@ -658,7 +659,7 @@ const RealisticPeopleLazy = lazy(() => import('./RealisticPeople.jsx'))
 function SharedOffice({ residents, onSelectProvider, layout, focus, onFocus, onSelectAgent, onSelectArea, pendingTaskCount, blockedTaskCount, huddle, geminiNeedsLogin = false, meeting = null, ambient = true }) {
   const zh = useLang() === 'zh'
   const [arrived,setArrived]=useState(()=>new Set())
-  const realisticFigures=useMemo(()=>typeof window!=='undefined'&&figuresV8aEnabled({search:window.location.search,storage:window.localStorage}),[])
+  const realisticFigures=useMemo(()=>typeof window!=='undefined'&&figuresV8aEnabled({search:window.location.search,storage:browserStorage(window)}),[])
   return <group>
     <Architecture layout={layout}/>
     {layout.zones.map((zone,index)=><group key={zone.id}>

@@ -35,4 +35,6 @@ AI_OFFICE_URL=http://127.0.0.1:5173 node "$S" handle-blocked-task TASK_ID < deci
 
 ## 查看状态
 
-`status` 的 `grokPatrol` 和 Grok 解阻协作区展示下次巡检、上次实际回写、唤醒失败等信息。`lastRequestedAt` 是办公室请求时间，`lastReadAt` 是队列读取时间，`lastHandledAt` 仅在有效回写后更新；本机来源标记不是对外部 Bot 身份的独立认证。没有新用户消息也应处理已有授权任务；不需要每十分钟报告一次“没有变化”。
+`status` 的 `grokPatrol` 和 Grok 解阻协作区展示下次巡检、上次实际回写、唤醒失败等信息。`lastRequestedAt` 是办公室请求时间，`lastReadAt` 是本机 Bot 命令通过受保护接口登记的读取时间，`lastHandledAt` 仅在有效回写后更新；本机来源标记不是对外部 Bot 身份的独立认证。没有新用户消息也应处理已有授权任务；不需要每十分钟报告一次“没有变化”。
+
+普通 `GET /api/office/grok/blocked-tasks` 只预览队列，不登记已读，也不能据此回写处理。`blocked-tasks` 命令先获取本机 CSRF token，再向 `POST /api/office/grok/blocked-tasks/read` 提交 `{"source":"grok-bot"}`，登记当前版本；这个写接口不通过手机网关或用户 relay 开放。只读模式禁止登记已读。
