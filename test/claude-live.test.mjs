@@ -19,12 +19,12 @@ function eventSource() {
   return { Source, instances };
 }
 const packet = (revision, extra = {}) => ({ revision, observedAt: '2026-11-10T00:00:00.000Z', sources: ['lifecycle'], ...extra });
-const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+const flush = async () => { for (let i = 0; i < 24; i++) await Promise.resolve(); };
 function bus() {
   const listeners = new Set(); let state = { transport: 'connecting' };
   return { subscribe(fn) { listeners.add(fn); fn({ kind: 'state', state }); return () => listeners.delete(fn); }, emit(kind, transport = state.transport) { state = { ...state, transport }; for (const fn of listeners) fn({ kind, state }); }, get size() { return listeners.size; } };
 }
-const response = value => ({ ok: true, json: async () => value });
+const response = value => ({ ok: true, text: async () => JSON.stringify(value) });
 
 test('three consumers share one channel and bursts coalesce to the newest source revision', () => {
   const timers = clock(), { Source, instances } = eventSource();
@@ -104,4 +104,33 @@ test('heartbeat metadata does not postpone the periodic source verification read
   assert.deepEqual(timers.delays(), [15000]);
   timers.advance(15000); await flush();
   assert.equal(calls, 2); await feed.stop();
+});
+
+
+test('hidden Claude views keep SSE invalidations but defer snapshots until visible, without reporting cancellation as offline', async () => {
+  const timers = clock(), events = bus(), target = new EventTarget(), requests = [], snapshots = [], errors = [];
+  target.visibilityState = 'hidden';
+  const show = state => { target.visibilityState = state; target.dispatchEvent(new Event('visibilitychange')); };
+  const feed = createClaudeLiveFeed({ url: '/api/claude/status', events, ...timers, visibilityTarget: target, focusTarget: null,
+    onSnapshot: data => snapshots.push(data), onError: error => errors.push(error),
+    fetchImpl: (_url, options) => new Promise(resolve => requests.push({ options, finish: value => resolve(response(value)) })) });
+  await feed.start(); events.emit('invalidate', 'live'); timers.advance(60000);
+  assert.equal(requests.length, 0);
+  show('visible'); assert.equal(requests.length, 1);
+  show('hidden'); show('visible'); await flush();
+  assert.equal(requests[0].options.signal.aborted, true); assert.equal(requests.length, 2);
+  requests[1].finish({ revision: 2 }); await flush(); requests[0].finish({ revision: 1 }); await flush();
+  assert.deepEqual(snapshots, [{ revision: 2 }]); assert.deepEqual(errors, []);
+  show('hidden'); events.emit('invalidate'); timers.advance(60000); await flush();
+  assert.equal(requests.length, 2); await feed.stop(); assert.equal(events.size, 0);
+});
+
+test('restarting a stopped feed cannot publish the previous generation or lose its new timer', async () => {
+  const timers = clock(), events = bus(), requests = [], snapshots = [];
+  const feed = createClaudeLiveFeed({ url: '/api/claude/status', events, ...timers, onSnapshot: data => snapshots.push(data),
+    fetchImpl: (_url, options) => new Promise(resolve => requests.push({ options, finish: value => resolve(response(value)) })) });
+  const old = feed.start(); const stopping = feed.stop(); const current = feed.start();
+  assert.equal(requests.length, 2); requests[1].finish({ revision: 2 }); await current;
+  requests[0].finish({ revision: 1 }); await Promise.all([old, stopping]);
+  assert.deepEqual(snapshots, [{ revision: 2 }]); assert.deepEqual(timers.delays(), [4000]); await feed.stop();
 });

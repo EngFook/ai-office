@@ -6,12 +6,10 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import { ArrowRight, ArrowUpRight, Box, BriefcaseBusiness, Check, ChevronRight, ClipboardList, FileText, FolderGit2, LayoutDashboard, Plus, UsersRound, X } from 'lucide-react';
-import OfficeScene from './OfficeScene';
 import OfficeOperations from './OfficeOperations';
 import { officeOperations, operationsHeadline } from './office-operations.js';
 import SceneRecovery from './SceneRecovery';
-import ClaudeWorkspace from './ClaudeWorkspace';
-import CodexWorkspace from './CodexWorkspace';
+import LazyPanel from './LazyPanel.jsx';
 import { OfficeToolbar, RoomDetails } from './OfficeNavigation';
 import { AgentActivity, AgentStatusPanel, SharedConnections, useClaudeConnection, useCodexConnection } from './ClaudeConnection';
 import { claudeAgentStatus } from './claude-office';
@@ -19,7 +17,6 @@ import { SHARED_DEPARTMENTS, buildSharedRoster, codexOfficeRole, resolveSharedSe
 import { taskMatchesAgent, findTaskAgent, modelReadiness, officeDepartmentFocus, roomProvider, localQwenConnection, connectedProviderResidents, residentStatusLabel, residentActivitySummary } from './office-ui.js';
 import { taskProjects } from './task-board-ui.js';
 import TaskBoard, { useTaskBoard, TaskBoardSummary, TaskProjects, NewProject } from './TaskBoard';
-import WorkReports from './WorkReports';
 import UsagePanel, { QuotaIndicator, AgentQuota } from './UsagePanel';
 import QwenWatchNotice from './QwenWatchNotice';
 import OfficeSetupStatus from './OfficeSetupStatus';
@@ -28,6 +25,11 @@ import { officeIdentity, officeDate } from './office-identity.js';
 import { installDomTranslator, setLang, useLang, t } from './i18n';
 import './style.css';
 import './shared-office.css';
+
+const loadOfficeScene = () => import('./OfficeScene.jsx');
+const loadClaudeWorkspace = () => import('./ClaudeWorkspace.jsx');
+const loadCodexWorkspace = () => import('./CodexWorkspace.jsx');
+const loadWorkReports = () => import('./WorkReports.jsx');
 
 const PROVIDER_COLORS = {'Claude Code':'#eda47f',Codex:'#68d7b0',Grok:'#a99af5',Gemini:'#8fa9d6','Local Qwen':'#c4b06d'};
 const ROOM_DESCRIPTIONS = [
@@ -188,17 +190,17 @@ function App() {
             <div className="office-explorer" ref={sceneRef}>
               <AgentStatusPanel agents={roster} loading={claude.loading && codex.loading} onSelectAgent={inspectAgent} provider="Shared studio" floor={3}/>
               <OfficeToolbar agents={roster} departments={SHARED_DEPARTMENTS} focus={sceneFocus} onFocus={openRoom} onReset={()=>{setCameraMode('3d');focusRoom('overview');}} onFullscreen={()=>sceneRef.current?.requestFullscreen?.()} mode={cameraMode} onMode={mode=>{setCameraMode(mode);setResetKey(key=>key+1);}} onDirectory={()=>openDirectory()}/>
-              <QwenWatchNotice watch={board.state.qwenWatch} huddle={board.state.huddle} tasks={board.state.tasks} runtime={liveRuntime} humanRequests={board.state.humanRequests} onTasks={()=>navigate('blocked')}/><div className="scene-wrap"><SceneRecovery onTasks={()=>navigate('tasks')} onDirectory={()=>openDirectory()}>{showHint&&<div className="scene-hint">{cameraMode==='plan'?'PINCH OR SCROLL TO ZOOM':'DRAG TO ROTATE · PINCH TO ZOOM'}</div>}<OfficeScene floor={3} agents={roster} residents={residents} onSelectProvider={inspectProvider} board={{...board.state,runtime:liveRuntime,...(board.stale ? {huddle:null,meeting:null} : {})}} activeAgentIndices={activeIndices} focus={sceneFocus} onFocus={openRoom} cameraMode={cameraMode} cameraRevision={resetKey} onSelectAgent={inspectAgent} onDeselect={()=>setSelection(null)} pendingTaskCount={pendingTaskCount} onSelectArea={navigate}/>{working.length===0 && !residents.some(resident=>resident.status==='working') && <div className="shared-empty-floor">{claude.loading && codex.loading?'Checking live activity…':residents.some(resident=>resident.duty?.live)?(lang==='zh'?'Qwen 持续值守中。点击常驻代表查看巡检与当前工作。':'Qwen remains on duty. Select its representative for inspections and current work.'):residents.length?'Connected providers remain here while idle. Click a representative for details.':'The studio is quiet. Working agents will appear automatically.'}</div>}</SceneRecovery></div>
+              <QwenWatchNotice watch={board.state.qwenWatch} huddle={board.state.huddle} tasks={board.state.tasks} runtime={liveRuntime} humanRequests={board.state.humanRequests} onTasks={()=>navigate('blocked')}/><div className="scene-wrap"><SceneRecovery load={loadOfficeScene} sceneProps={{floor:3,agents:roster,residents,onSelectProvider:inspectProvider,board:{...board.state,runtime:liveRuntime,...(board.stale ? {huddle:null,meeting:null} : {})},activeAgentIndices:activeIndices,focus:sceneFocus,onFocus:openRoom,cameraMode,cameraRevision:resetKey,onSelectAgent:inspectAgent,onDeselect:()=>setSelection(null),pendingTaskCount,onSelectArea:navigate}} onTasks={()=>navigate('tasks')} onDirectory={()=>openDirectory()}>{showHint&&<div className="scene-hint">{cameraMode==='plan'?'PINCH OR SCROLL TO ZOOM':'DRAG TO ROTATE · PINCH TO ZOOM'}</div>}{working.length===0 && !residents.some(resident=>resident.status==='working') && <div className="shared-empty-floor">{claude.loading && codex.loading?'Checking live activity…':residents.some(resident=>resident.duty?.live)?(lang==='zh'?'Qwen 持续值守中。点击常驻代表查看巡检与当前工作。':'Qwen remains on duty. Select its representative for inspections and current work.'):residents.length?'Connected providers remain here while idle. Click a representative for details.':'The studio is quiet. Working agents will appear automatically.'}</div>}</SceneRecovery></div>
 
             </div>
           </section>
           <TaskBoardSummary board={board} onOpen={()=>navigate('tasks')} onManagement={()=>setView('management')}/>
           <div className="shared-overview"><SharedConnections claude={mergedClaude} codex={mergedCodex} grok={grok} qwen={qwen} onDirectory={()=>openDirectory()}/><section className="shared-roles"><span className="section-kicker">CODEX · Specialist Roles</span><h3>Keeping the team moving</h3><div>{['Facilitator','Admin','Helper','Tester'].map(role=><button key={role} onClick={()=>openDirectory(officeRoleLabel(role,'Codex'))}><span>{officeRoleLabel(role,'Codex')}</span><strong>{working.filter(agent=>agent.provider==='Codex' && (agent.role || codexOfficeRole(agent.runtimeAgents[0]))===role).length}</strong></button>)}</div><p>Facilitators host; coordinators organise; builders develop; testers check.</p></section></div>
           <div className="shared-room-cards">{SHARED_DEPARTMENTS.map((department,index)=><button key={department} onClick={()=>visitRoom(index)}><span className="section-kicker">{index===0?'MAIN STUDIO':index===1?'REVIEW & BALANCE':index===2?'DISPATCH':index===4?'LOCAL ASSISTANCE':'RESEARCH'}</span><strong>{department}</strong><p>{ROOM_DESCRIPTIONS[index]}</p><span className="shared-room-visit" data-no-i18n>{working.filter(agent=>agent.department===department).length} {lang==='zh'?'位运行':'running'} <ArrowUpRight size={14}/></span></button>)}</div>
-        </>:view==='claude-workspace'?<ClaudeWorkspace onBack={()=>navigate('office')} board={board} onOpenDispatch={()=>navigate('management')}/>:view==='codex-workspace'?<CodexWorkspace onBack={()=>navigate('office')} board={board} onOpenDispatch={()=>navigate('management')}/>:view==='tasks'||view==='management'?<TaskBoard key={`${view}:${taskStatusFilter}:${taskToOpen || ''}`} board={board} initialTaskId={taskToOpen} initialStatus={taskStatusFilter} initialTab={view==='management'?'management':'board'} onOpenAgent={openTaskAgent}/>:<section className="list-page">
+        </>:view==='claude-workspace'?<LazyPanel key="claude-workspace" load={loadClaudeWorkspace} onTasks={()=>navigate('tasks')} panelProps={{onBack:()=>navigate('office'),board,onOpenDispatch:()=>navigate('management')}}/>:view==='codex-workspace'?<LazyPanel key="codex-workspace" load={loadCodexWorkspace} onTasks={()=>navigate('tasks')} panelProps={{onBack:()=>navigate('office'),board,onOpenDispatch:()=>navigate('management')}}/>:view==='tasks'||view==='management'?<TaskBoard key={`${view}:${taskStatusFilter}:${taskToOpen || ''}`} board={board} initialTaskId={taskToOpen} initialStatus={taskStatusFilter} initialTab={view==='management'?'management':'board'} onOpenAgent={openTaskAgent}/>:<section className="list-page">
           <div className="page-heading"><div><div className="eyebrow">Studio</div><h1>{view==='projects'?'Projects':'Reports'}<span className="heading-period">.</span></h1><p>{view==='projects'?'Choose a project to see its requests.':'Reports and notes, together in one place.'}</p></div><button className="primary-button" disabled={view==='projects'&&!officeCapability(board.state,'projects')} onClick={()=>view==='projects'?setModal('project'):openReport()}><Plus size={16}/>{view==='projects'?'Add project':'Add a report'}</button></div>
           {view==='projects' && <TaskProjects board={board} onOpenAgent={openTaskAgent} onAddProject={()=>setModal('project')}/>}
-          {view==='reports' && <WorkReports/>}
+          {view==='reports' && <LazyPanel load={loadWorkReports} onTasks={()=>navigate('tasks')}/>}
           {view==='projects' ? <details className="tb-manual-assignments"><summary>Manual assignments</summary><button className="outline-button" onClick={()=>openAssign()}><Plus size={15}/>Create assignment</button>{renderAssignmentRecords()}</details> : renderAssignmentRecords()}
         </section>}
       </div><footer><span data-no-i18n>{identity.name}</span><span data-no-i18n>{identity.timeZone}</span></footer>

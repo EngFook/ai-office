@@ -1,4 +1,5 @@
 import { useOfficeDate, useOfficeIdentity } from './OfficeIdentity';
+import { usageDataStore } from './usage-data-store.js';
 import React, { useEffect, useState } from 'react';
 import { CheckCircle2, CircleHelp, Clock3 } from 'lucide-react';
 import { t, useLang } from './i18n';
@@ -8,30 +9,11 @@ const fmt = n => n >= 1e9 ? `${(n/1e9).toFixed(2)}B` : n >= 1e6 ? `${(n/1e6).toF
 
 const percent = value => Math.round(value * 10) / 10;
 
-// Header, drawer and panel share one read-only request and one refresh timer.
-let usageState = { data: null, error: null, loading: true };
-const usageListeners = new Set();
-let usageTimer, usageRequest;
-function refreshUsage() {
-  if (usageRequest) return usageRequest;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
-  usageRequest = fetch('/api/usage', { cache: 'no-store', signal: controller.signal })
-    .then(response => response.ok ? response.json() : Promise.reject(new Error(response.status)))
-    .then(data => { usageState = { data, error: null, loading: false }; })
-    .catch(() => { usageState = { ...usageState, error: 'Usage data unavailable', loading: false }; })
-    .finally(() => { clearTimeout(timeout); usageRequest = null; usageListeners.forEach(listener => listener(usageState)); });
-  return usageRequest;
-}
+// Header, drawer and panel share one visible-page subscription.
+const refreshUsage = () => usageDataStore.refresh();
 export function useUsage(active = true) {
-  const [state, setState] = useState(usageState);
-  useEffect(() => {
-    if (!active) return;
-    usageListeners.add(setState);
-    setState(usageState);
-    if (!usageTimer) { refreshUsage(); usageTimer = setInterval(refreshUsage, 30000); }
-    return () => { usageListeners.delete(setState); if (!usageListeners.size) { clearInterval(usageTimer); usageTimer = null; } };
-  }, [active]);
+  const [state, setState] = useState(usageDataStore.getSnapshot);
+  useEffect(() => active ? usageDataStore.subscribe(setState) : undefined, [active]);
   return state;
 }
 function useClock() {

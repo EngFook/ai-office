@@ -7,6 +7,7 @@ import { t, useLang } from './i18n';
 import './shared-connection.css';
 import { agentExecutionDisplay, isConfirmedExecution, officeExecutionCounts, officeRuntimeWorkers } from './claude-execution.js';
 import { createClaudeLiveFeed } from './claude-live.js';
+import { createPollingResource } from './polling-resource.js';
 
 const EMPTY = {skills:[], agents:[], connected:false, hookInstalled:false};
 function useAgentConnection(provider) {
@@ -23,28 +24,12 @@ function useAgentConnection(provider) {
       void feed.start();
       return () => { void feed.stop(); };
     }
-    let disposed = false;
-    let timer;
-    let request;
-    const refresh = async () => {
-      const providerName = provider === 'codex' ? 'Codex' : provider === 'grok' ? 'Grok' : 'Claude Code';
-      request = new AbortController();
-      const timeout = setTimeout(()=>request.abort(), 5000);
-      try {
-        const response = await fetch(`/api/${provider}/status`, {signal:request.signal, cache:'no-store'});
-        if (!response.ok) throw new Error(`The local ${providerName} bridge is unavailable.`);
-        const data = await response.json();
-        if (!Array.isArray(data.skills) || !Array.isArray(data.agents)) throw new Error(`The local ${providerName} bridge returned an invalid response.`);
-        if (!disposed) setState({...data, receivedAt: Date.now(), loading:false, error:null});
-      } catch (error) {
-        if (!disposed) setState(previous=>({...previous, connected:false, loading:false, error:`The local ${providerName} connection is offline. Restart the studio to reconnect.`}));
-      } finally {
-        clearTimeout(timeout);
-        if (!disposed) timer = setTimeout(refresh, 2000);
-      }
-    };
-    refresh();
-    return ()=>{disposed=true;clearTimeout(timer);request?.abort();};
+    const providerName = provider === 'codex' ? 'Codex' : provider === 'grok' ? 'Grok' : 'Claude Code';
+    const resource = createPollingResource({ url: `/api/${provider}/status`, initialData: EMPTY, pollMs: 2000, timeoutMs: 5000,
+      validate: data => Array.isArray(data?.skills) && Array.isArray(data?.agents),
+      errorMessage: `The local ${providerName} connection is temporarily unavailable. Reconnecting automatically.`,
+    });
+    return resource.subscribe(({ data, loading, error, receivedAt }) => setState({ ...data, loading, error, receivedAt, ...(error ? { connected: false } : {}) }));
   }, [provider]);
   return state;
 }

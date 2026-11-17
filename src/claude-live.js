@@ -1,3 +1,5 @@
+import { requestJson } from './json-request.js';
+
 const SOURCES = new Set(['lifecycle', 'sessions', 'transcripts']);
 
 // Share one local invalidation channel. Its connection state is not agent status.
@@ -64,38 +66,48 @@ export function createClaudeEventHub({ EventSourceImpl = globalThis.EventSource,
 export const claudeEvents = createClaudeEventHub();
 
 // Only one request per view. Changes during a read queue one fresh follow-up.
-export function createClaudeLiveFeed({ url, validate = () => true, onSnapshot, onError = () => {}, onSync = () => {}, events = claudeEvents, fetchImpl = globalThis.fetch, pollMs = 4000, verifyMs = 30000, timeoutMs = 15000, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+export function createClaudeLiveFeed({ url, validate = () => true, onSnapshot, onError = () => {}, onSync = () => {}, events = claudeEvents, fetchImpl = globalThis.fetch, pollMs = 4000, verifyMs = 30000, timeoutMs = 15000, visibilityTarget = globalThis.document, focusTarget = globalThis.window, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   let stopped = true, pending = null, dirty = false, controller = null, timer = null, unsubscribe;
-  let transport = 'connecting';
+  let transport = 'connecting', generation = 0;
+  const hiddenAbort = new Error('Snapshot reading paused while the page is hidden.');
+  const visible = () => visibilityTarget?.visibilityState !== 'hidden';
   function schedule() {
     clearTimer(timer);
-    if (!stopped && !pending) timer = setTimer(() => { timer = null; void refresh(); }, transport === 'live' ? verifyMs : pollMs);
+    if (!stopped && !pending && visible()) timer = setTimer(() => { timer = null; void refresh(); }, transport === 'live' ? verifyMs : pollMs);
   }
-  async function read() {
-    while (dirty && !stopped) {
+  async function read(epoch) {
+    while (dirty && !stopped && epoch === generation && visible()) {
       dirty = false;
       const request = new AbortController(); controller = request;
-      const timeout = setTimer(() => request.abort(), timeoutMs);
       try {
-        const response = await fetchImpl(url, { signal: request.signal, cache: 'no-store' });
-        if (!response.ok) throw new Error('Claude snapshot unavailable.');
-        const data = await response.json();
+        const data = await requestJson(url, { fetchImpl, controller: request, timeoutMs, setTimer, clearTimer });
         if (!validate(data)) throw new Error('Invalid Claude snapshot.');
-        if (!stopped) onSnapshot(data);
-      } catch (error) { if (!stopped) onError(error); }
-      finally { clearTimer(timeout); if (controller === request) controller = null; }
+        if (!stopped && epoch === generation && !request.signal.aborted) onSnapshot(data);
+      } catch (error) { if (!stopped && epoch === generation && visible() && request.signal.reason !== hiddenAbort) onError(error); }
+      finally { if (controller === request) controller = null; }
     }
   }
   function refresh() {
     if (stopped) return Promise.resolve();
     dirty = true; clearTimer(timer); timer = null;
-    if (!pending) pending = read().finally(() => { pending = null; schedule(); });
+    if (!visible()) return Promise.resolve();
+    if (!pending) {
+      const flight = read(generation).finally(() => { if (pending === flight) { pending = null; schedule(); } });
+      pending = flight;
+    }
     return pending;
   }
+  const wake = () => {
+    if (stopped) return;
+    if (visible()) void refresh();
+    else { clearTimer(timer); timer = null; dirty = true; controller?.abort(hiddenAbort); }
+  };
   return {
     start() {
       if (!stopped) return pending || Promise.resolve();
       stopped = false;
+      visibilityTarget?.addEventListener('visibilitychange', wake);
+      focusTarget?.addEventListener('focus', wake);
       unsubscribe = events.subscribe(event => {
         if (stopped) return;
         const changedTransport = transport !== event.state.transport;
@@ -105,6 +117,6 @@ export function createClaudeLiveFeed({ url, validate = () => true, onSnapshot, o
       return refresh();
     },
     refresh,
-    stop() { stopped = true; dirty = false; clearTimer(timer); timer = null; unsubscribe?.(); unsubscribe = null; controller?.abort(); return pending || Promise.resolve(); },
+    stop() { stopped = true; generation++; visibilityTarget?.removeEventListener('visibilitychange', wake); focusTarget?.removeEventListener('focus', wake); dirty = false; clearTimer(timer); timer = null; unsubscribe?.(); unsubscribe = null; controller?.abort(); const previous = pending; pending = null; return previous || Promise.resolve(); },
   };
 }

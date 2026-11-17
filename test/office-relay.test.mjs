@@ -6,6 +6,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { officeRelay } from '../server/office-relay.mjs';
+import { gunzipSync } from 'node:zlib';
 const id='0c35ab78-2f4a-4110-8ebd-f98eb9a0aa56';
 async function fixture(t, options={}){
  const home=await mkdtemp(path.join(tmpdir(),'office-relay-test-'));t.after(()=>rm(home,{recursive:true,force:true}));
@@ -20,7 +21,7 @@ async function fixture(t, options={}){
  };
  const create=()=>{let handler;const httpServer=new EventEmitter();t.after(()=>httpServer.emit('close'));officeRelay({home,upstream:'http://127.0.0.1:5999',fetchImpl,...options}).configureServer({httpServer,middlewares:{use:value=>handler=value}});return async(url='/api/office/board',input,options={})=>{
   const request=Readable.from(input?[Buffer.from(JSON.stringify(input))]:[]);Object.assign(request,{url,method:input?'POST':'GET',socket:{remoteAddress:'127.0.0.1'},headers:{host:'127.0.0.1:5186','content-type':'application/json',...options.headers},...options.request});
-  let body;const response={statusCode:200,setHeader(){},end(value){body=JSON.parse(value)}};await handler(request,response,()=>assert.fail('Expected route'));return {status:response.statusCode,body};
+  let body;const headers={};const response={statusCode:200,setHeader(name,value){headers[name.toLowerCase()]=value;},getHeader(name){return headers[name.toLowerCase()];},end(value){body=JSON.parse(headers['content-encoding']==='gzip'?gunzipSync(value):value)}};await handler(request,response,()=>assert.fail('Expected route'));return {status:response.statusCode,body,headers};
  };};
  const call=create();const board=await call();return {home,state,call,create,token:board.body.csrfToken,posts:()=>posts,setUncertain:()=>uncertain=true};
 }
@@ -102,4 +103,46 @@ test('relay preserves upstream office identity/catalog and gates project registr
  const readonly=await fixture(t,{userActions:false});readonly.state.capabilities={projects:true};
  assert.equal((await readonly.call()).body.capabilities.projects,false);
  assert.equal((await readonly.call('/api/office/projects',request,{headers:{'x-office-token':readonly.token}})).status,403);
+});
+
+test('ten simultaneous board views share one upstream read, preserve all data and isolate upstream authority', async t => {
+ const state={csrfToken:'UPSTREAM_TOKEN',configuration:{mode:'enabled'},capabilities:{projects:true},dispatchSync:{source:'office-queue'},tasks:[{id:'one',description:'Full task history '.repeat(1000)}],observedAt:'2026-11-17T00:00:00Z'};
+ let reads=0,hold=false,release;
+ const fetchImpl=async()=>{reads++;if(hold)await new Promise(resolve=>{release=resolve;});return{ok:true,status:200,json:async()=>structuredClone(state)};};
+ const f=await fixture(t,{fetchImpl,userActions:true});reads=0;hold=true;
+ const reading=Promise.all(Array.from({length:10},()=>f.call('/api/office/board',undefined,{headers:{'accept-encoding':'gzip'}})));
+ assert.equal(reads,1);release();hold=false;
+ const views=await reading;
+ for(const view of views){
+  assert.equal(view.status,200);assert.equal(view.headers['content-encoding'],'gzip');
+  assert.equal(view.body.csrfToken,f.token);assert.equal(view.body.configuration.mode,'read-only');
+  assert.equal(view.body.capabilities.projects,true);assert.deepEqual(view.body.tasks,state.tasks);assert.equal(view.body.observedAt,state.observedAt);
+ }
+ assert.equal(state.csrfToken,'UPSTREAM_TOKEN');assert.equal(state.configuration.mode,'enabled');
+ await f.call();assert.equal(reads,2,'a completed observation must never be cached');
+});
+
+test('writes bypass an older shared read and later reads cannot reuse a pre-mutation snapshot', async t => {
+ const state={csrfToken:'BEFORE',configuration:{mode:'enabled'},dispatchSync:{source:'office-queue'},settings:{autoPickup:false}};
+ let reads=0,pauseNext=false,release,postedToken;
+ const fetchImpl=async(_url,options={})=>{
+  if(!options.method){reads++;const value=structuredClone(state);if(pauseNext){pauseNext=false;await new Promise(resolve=>{release=resolve;});}return{ok:true,status:200,json:async()=>value};}
+  postedToken=options.headers['X-Office-Token'];state.settings.autoPickup=true;
+  return{ok:true,status:200,json:async()=>({settings:structuredClone(state.settings)})};
+ };
+ const f=await fixture(t,{fetchImpl,userActions:true});reads=0;pauseNext=true;
+ const oldView=f.call();state.csrfToken='AFTER';
+ const changed=await f.call('/api/office/settings',{autoPickup:true},{headers:{'x-office-token':f.token},request:{method:'PATCH'}});
+ assert.equal(changed.status,200);assert.equal(postedToken,'AFTER');assert.equal(reads,2);
+ const current=await f.call();assert.equal(current.body.settings.autoPickup,true);assert.equal(reads,3);
+ release();assert.equal((await oldView).body.settings.autoPickup,false,'an already-started read retains its actual observation');
+});
+
+test('a failed shared board read is discarded so later polls can reconnect', async t => {
+ let broken=false,reads=0;
+ const f=await fixture(t,{fetchImpl:async()=>{reads++;if(broken)throw new Error('unavailable');return{ok:true,status:200,json:async()=>({csrfToken:'SECRET',configuration:{mode:'enabled'}})};}});
+ reads=0;broken=true;
+ const failed=await Promise.all(Array.from({length:10},()=>f.call()));
+ assert.equal(reads,1);assert.ok(failed.every(result=>result.status===503));
+ broken=false;assert.equal((await f.call()).status,200);assert.equal(reads,2);
 });

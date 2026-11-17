@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { readProjectCatalog } from './project-catalog.mjs';
 import { createGrokWake } from './grok-wake.mjs';
 import { readGrokConversation } from './grok-conversation.mjs';
+import { sendJson } from './http-json.mjs';
 
 const reads = new Set(['/api/office/board', '/api/office/human-requests', '/api/office/work-reports', '/api/office/daily-reports', '/api/office/daily-reports/pending', '/api/grok/status', '/api/usage']);
 const requestId = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -42,11 +43,22 @@ export function officeRelay({ upstream = 'http://127.0.0.1:5173', home = process
   catch (error) { if (error.code!=='ENOENT') throw new Error('Dispatch relay journal is unreadable; refusing writes.'); }
   const save=()=>{mkdirSync(home,{recursive:true,mode:0o700}); const tmp=journalFile+'.tmp';writeFileSync(tmp,JSON.stringify(journal),{mode:0o600});renameSync(tmp,journalFile);};
   const upstreamFetch=(url,options={})=>fetchImpl(target.origin+url,{...options,signal:AbortSignal.timeout(15000)});
-  async function liveBoard() {
+  let boardPending = null;
+  async function fetchBoard() {
     const response=await upstreamFetch('/api/office/board');
     if (!response.ok) throw new Error('Live office unavailable');
     const value=await response.json();
     return { value, writable:Boolean(value.csrfToken) && (!value.configuration || value.configuration.mode==='enabled') };
+  }
+  async function liveBoard({ shared = true } = {}) {
+    if (!shared) return fetchBoard();
+    if (!boardPending) {
+      const reading = fetchBoard().finally(() => { if (boardPending === reading) boardPending = null; });
+      boardPending = reading;
+    }
+    // Each view rewrites its own capabilities/token. It must not mutate another
+    // reader's upstream state or leak the local view token into a worker POST.
+    return structuredClone(await boardPending);
   }
   let wake = dispatchWake, timer, waking = null, stopped = false;
   function wakeFor(value) {
@@ -67,7 +79,7 @@ export function officeRelay({ upstream = 'http://127.0.0.1:5173', home = process
     const url=req.url?.split('?')[0];
     if (!url?.startsWith('/api/')) return next();
     res.setHeader('Content-Type','application/json; charset=utf-8');res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
-    const send=(value,status=200)=>{res.statusCode=status;res.end(JSON.stringify(value));};
+    const send=(value,status=200)=>sendJson(req,res,value,status);
     if (!allowed(req)) return send({error:'Local same-origin access only.'},403);
     if (url === '/api/office/grok/conversation') {
       if (req.method !== 'GET') return send({ error: 'Conversation mirror is read-only.' }, 405);
@@ -105,7 +117,9 @@ export function officeRelay({ upstream = 'http://127.0.0.1:5173', home = process
     const key=retry || userRoute?null:`${target.origin}:${payload.requestId}`;
     const hash=createHash('sha256').update(JSON.stringify(payload)).digest('hex');
     try {
-      const {value,writable}=await liveBoard();
+      // A write always rechecks current upstream permission and CSRF state;
+      // it cannot borrow a read already underway before another mutation.
+      const {value,writable}=await liveBoard({ shared: false });
       if(!writable)return send({error:'The live office is read-only. Changes cannot be sent.'},403);
       if (url === '/api/office/projects' && value.capabilities?.projects !== true) return send({error:'Project registration is not available in the live office.'},403);
       // After an uncertain response, never blindly repeat a legacy upstream POST.
@@ -117,8 +131,12 @@ export function officeRelay({ upstream = 'http://127.0.0.1:5173', home = process
         return send({error:'The prior submission has an unconfirmed result. Check the live dispatch history before sending another instruction.'},409);
       }
       if(key){journal[key]={hash,state:'sending',at:Date.now()};save();}
-      const response=await upstreamFetch(url,{method:req.method,headers:{'Content-Type':'application/json','X-Office-Token':value.csrfToken},body:JSON.stringify(payload)});
-      const result=await response.json();
+      boardPending = null;
+      let response, result;
+      try {
+        response=await upstreamFetch(url,{method:req.method,headers:{'Content-Type':'application/json','X-Office-Token':value.csrfToken},body:JSON.stringify(payload)});
+        result=await response.json();
+      } finally { boardPending = null; }
       if(key){
         if(response.ok && result.instruction?.id)journal[key]={hash,id:result.instruction.id,state:'saved',at:Date.now()};
         else if(response.status>=400 && response.status<500)delete journal[key];

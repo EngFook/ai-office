@@ -8,15 +8,17 @@ import { createMobileGateway } from '../server/mobile-gateway.mjs';
 import { requestId } from '../src/request-id.js';
 import { selectedForScope } from '../src/task-selection.js';
 import { filterBoardTasks } from '../src/task-board-ui.js';
+import { gunzipSync } from 'node:zlib';
+import { sendJson } from '../server/http-json.mjs';
 
 const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const close = server => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
-async function fixture(t) {
+async function fixture(t, payload = { fixture: true }, upstreamHandler) {
   const dir = await mkdtemp(path.join(tmpdir(), 'office-mobile-'));
   await writeFile(path.join(dir, 'index.html'), '<h1>office fixture</h1>');
   await symlink('/etc/hosts', path.join(dir, 'outside'));
   const calls = [];
-  const upstream = http.createServer((req, res) => { calls.push({ headers: req.headers, path: req.url }); res.setHeader('Content-Type', 'application/json'); res.statusCode = req.method === 'POST' && req.headers['x-office-token'] !== 'fixture-csrf' ? 403 : 200; res.end(JSON.stringify({ fixture: true })); });
+  const upstream = http.createServer((req, res) => { calls.push({ headers: req.headers, path: req.url }); if (upstreamHandler) return upstreamHandler(req, res); sendJson(req, res, payload, req.method === 'POST' && req.headers['x-office-token'] !== 'fixture-csrf' ? 403 : 200); });
   await listen(upstream);
   let clock = 1000;
   const key = 'fixture-only-access-key-of-32-characters';
@@ -45,6 +47,45 @@ test('mobile entry requires authentication for static assets and all office APIs
  assert.equal((await fetch(f.base + '/server/task-store.mjs', { headers: { Cookie: cookie } })).status, 404);
  f.advance(8 * 86400000);
  assert.equal((await fetch(f.base + '/api/office/board', { headers: { Cookie: cookie } })).status, 401);
+});
+
+test('paired mobile proxy preserves gzip bytes and negotiation without exposing upstream before login', async t => {
+ const payload = { tasks: [{ version: 7, description: '完整手机任务记录。'.repeat(1000) }] };
+ const f = await fixture(t, payload);
+ assert.equal((await fetch(f.base + '/api/office/board')).status, 401);
+ assert.equal(f.calls.length, 0);
+ const cookie = await f.session();
+ const request = encoding => new Promise((resolve, reject) => {
+  http.get(f.base + '/api/office/board', { headers: { Cookie: cookie, 'Accept-Encoding': encoding } }, res => {
+   const chunks = []; res.on('data', chunk => chunks.push(chunk));
+   res.on('end', () => resolve({ headers: res.headers, body: Buffer.concat(chunks) })); res.on('error', reject);
+  }).on('error', reject);
+ });
+ const zipped = await request('gzip');
+ assert.equal(zipped.headers['content-encoding'], 'gzip');
+ assert.equal(Number(zipped.headers['content-length']), zipped.body.length);
+ assert.match(zipped.headers.vary, /Accept-Encoding/);
+ assert.deepEqual(JSON.parse(gunzipSync(zipped.body)), payload);
+ assert.equal(f.calls.at(-1).headers.cookie, undefined);
+ const plain = await request('identity');
+ assert.equal(plain.headers['content-encoding'], undefined);
+ assert.deepEqual(JSON.parse(plain.body), payload);
+});
+
+test('mobile proxy terminates promptly when upstream truncates an encoded response', async t => {
+ const f = await fixture(t, null, (_req, res) => {
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', 'Content-Length': '1000' });
+  res.write(Buffer.from([31, 139, 8, 0])); setImmediate(() => res.destroy());
+ });
+ const cookie = await f.session();
+ await new Promise((resolve, reject) => {
+  const req = http.get(f.base + '/api/office/board', { headers: { Cookie: cookie, 'Accept-Encoding': 'gzip' } }, res => {
+   res.resume(); res.once('aborted', resolve); res.once('error', resolve);
+   res.once('end', () => reject(new Error('Truncated response incorrectly completed')));
+  });
+  req.once('error', resolve);
+  req.setTimeout(1500, () => { reject(new Error('Truncated response hung')); req.destroy(); });
+ });
 });
 test('authenticated proxy enforces origin and preserves office CSRF without forwarding phone credentials', async t => {
  const f = await fixture(t), cookie = await f.session();

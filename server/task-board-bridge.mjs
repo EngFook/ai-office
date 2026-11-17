@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { readFileSync } from 'node:fs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { sendJson } from './http-json.mjs';
 import { TaskBoardError } from './task-store.mjs';
 import { validateManagementPlan } from './grok-management.mjs';
 import { readGrokConversation } from './grok-conversation.mjs';
@@ -82,7 +83,7 @@ export function taskBoardBridge({ store, onInstruction, onTaskChange, getRuntime
     response.setHeader('Content-Type', 'application/json; charset=utf-8');
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
-    const send = (value, status = 200) => { response.statusCode = status; response.end(JSON.stringify(value)); };
+    const send = (value, status = 200) => sendJson(request, response, value, status);
     try {
       if (!allowed(request)) throw httpError('Local same-origin access only.', 403);
       if (pathname === '/api/office/grok/conversation') {

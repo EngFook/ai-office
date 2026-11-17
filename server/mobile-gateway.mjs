@@ -71,9 +71,17 @@ export function createMobileGateway({ host, port = 5174, accessKey, distDir, ups
         // Keep the upstream loopback-only. Rewrite only after authenticated origin checks;
         // the office's own CSRF token is still required for every write.
         const headers = { host: `127.0.0.1:${upstreamPort}`, origin: `http://127.0.0.1:${upstreamPort}`, 'sec-fetch-site': 'same-origin' };
-        for (const name of ['content-type', 'content-length', 'accept', 'x-office-token']) if (request.headers[name]) headers[name] = request.headers[name];
+        for (const name of ['content-type', 'content-length', 'accept', 'accept-encoding', 'x-office-token']) if (request.headers[name]) headers[name] = request.headers[name];
         const upstream = http.request({ host: '127.0.0.1', port: upstreamPort, path: url.pathname + url.search, method: request.method, headers, timeout: 45000 }, incoming => {
-          response.writeHead(incoming.statusCode, { 'Content-Type': incoming.headers['content-type'] || 'application/json' }); incoming.pipe(response);
+          const responseHeaders = { 'Content-Type': incoming.headers['content-type'] || 'application/json' };
+          // http.request streams the encoded bytes unchanged. Preserve their
+          // encoding and length so phone browsers decode exactly once.
+          for (const name of ['content-encoding', 'content-length', 'vary']) if (incoming.headers[name]) responseHeaders[name] = incoming.headers[name];
+          // A truncated response must fail promptly; otherwise the phone waits
+          // indefinitely for the declared bytes (including incomplete gzip).
+          incoming.once('aborted', () => response.destroy());
+          incoming.once('error', () => response.destroy());
+          response.writeHead(incoming.statusCode, responseHeaders); incoming.pipe(response);
         });
         upstream.on('timeout', () => upstream.destroy());
         upstream.on('error', () => { if (!response.headersSent) send(502, { error: 'Mac 上的辦公室服務暫時未回應，請稍後重試。' }); else response.destroy(); });

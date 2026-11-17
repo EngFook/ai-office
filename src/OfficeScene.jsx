@@ -28,6 +28,7 @@ import CentralSocial from './CentralSocial.jsx'
 import { residentFigures } from './office-resident-layout.js'
 import ResidentLabels from './ResidentLabels.jsx'
 import OptionalSceneEffects from './OptionalSceneEffects.jsx'
+import { startVisibleSceneLoop } from './scene-activity.js'
 import './studio-beauty.css'
 
 const BakedContactShadows = createBakedContactShadows(ContactShadows)
@@ -727,11 +728,9 @@ function SceneStats() {
 // OrbitControls and camera flights invalidate independently for fluid gestures.
 function SceneActivity({ active, reducedMotion }) {
   const invalidate=useThree(state=>state.invalidate)
+  const canvas=useThree(state=>state.gl.domElement)
   const {motionHz}=useSceneQuality()
-  useEffect(()=>{
-    const timer=window.setInterval(()=>{if(!document.hidden)invalidate()},active&&!reducedMotion ? 1000/motionHz : 1000)
-    return ()=>window.clearInterval(timer)
-  },[active,reducedMotion,motionHz,invalidate])
+  useEffect(()=>startVisibleSceneLoop(invalidate,{target:canvas,intervalMs:active&&!reducedMotion ? 1000/motionHz : 1000}),[active,reducedMotion,motionHz,invalidate,canvas])
   return null
 }
 

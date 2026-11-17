@@ -1,4 +1,5 @@
 import { requestProjectPath, requestProviderOptions } from './request-form.js';
+import { createTaskBoardClient, EMPTY_BOARD } from './task-board-client.js';
 import { officeCapability } from './office-capabilities.js';
 import { officeSnapshotStale } from './office-operations.js';
 import { useOfficeDate } from './OfficeIdentity';
@@ -21,7 +22,7 @@ import { taskReviewStatus, taskReviewLabel } from './review-ui.js'
 import { compactTaskText } from './task-card-content.js'
 import { activeTaskJob, blockedOwnership, taskHumanStage, huddleProviderLabel, resolutionStateLabel } from './huddle-ui.js'
 
-const EMPTY = { tasks: [], roles: [], instructions: [], settings: { autoPickup: false }, runtime: { providers: {}, running: [] }, grok: { configured: false, connected: false }, csrfToken: '' }
+const EMPTY = EMPTY_BOARD
 const COLUMNS = [{ id: 'pending', name: 'To do', Icon: CircleDashed }, { id: 'running', name: 'Working', Icon: Activity }, { id: 'blocked', name: 'Blocked', Icon: AlertCircle }, { id: 'done', name: 'Done', Icon: CheckCircle2 }]
 import { LOCAL_QWEN_TYPES } from '../server/local-qwen-policy.mjs'
 const PROVIDERS = { any: 'Any available agent', codex: 'Codex', claude: 'Claude Code', gemini: 'Gemini research (read-only)', grok: 'Grok Dispatch', 'grok-bot': 'Grok Bot', 'local-qwen': 'Local Qwen (preliminary only)' }
@@ -68,14 +69,6 @@ function ResolutionSummary({ task, detail = false, tasks = [], runtime = {}, hum
   </span>
 }
 
-async function readResponse(response) {
-  const source = await response.text()
-  let data
-  try { data = source ? JSON.parse(source) : {} } catch { throw new Error('The local studio service returned an unreadable response.') }
-  if (!response.ok) throw new Error(typeof data.error === 'string' ? data.error : data.error?.message || data.message || `The studio service returned ${response.status}.`)
-  return data
-}
-
 export function useTaskBoard() {
   const [state, setState] = useState(EMPTY)
   const [dispatchDraft, setDispatchDraft] = useState({ text: '', projectPath: null, requestId: null })
@@ -85,66 +78,44 @@ export function useTaskBoard() {
   const [lastSuccessAt, setLastSuccessAt] = useState(null)
   const [clock, setClock] = useState(Date.now)
   const [pending, setPending] = useState(0)
-  const stateRef = useRef(EMPTY), mounted = useRef(true), sequence = useRef(0), requests = useRef(new Set())
-  const refresh = useCallback(async (options = {}) => {
-    const quiet = options.quiet === true
-    const request = ++sequence.current
-    const controller = new AbortController()
-    requests.current.add(controller)
-    const timeout = setTimeout(() => controller.abort(), 15000)
-    if (!quiet && mounted.current) setLoading(true)
-    try {
-      const response = await fetch('/api/office/board', { cache: 'no-store', credentials: 'same-origin', headers: { Accept: 'application/json' }, signal: controller.signal })
-      const data = await readResponse(response)
-      const next = { ...EMPTY, ...data, tasks: Array.isArray(data.tasks) ? data.tasks : [], roles: Array.isArray(data.roles) ? data.roles : [], instructions: Array.isArray(data.instructions) ? data.instructions : [], settings: { ...EMPTY.settings, ...data.settings }, runtime: { ...EMPTY.runtime, ...data.runtime }, grok: { ...EMPTY.grok, ...data.grok } }
-      if (mounted.current && request === sequence.current) {
-        stateRef.current = next
-        setState(next)
-        setLastSuccessAt(Date.now())
-        setRefreshError('')
-        setFailure(previous => previous?.kind === 'refresh' ? null : previous)
-      }
-      return next
-    } catch (error) {
-      const failure = controller.signal.aborted ? new Error('The local studio service did not respond. Refresh and try again.') : error
-      if (mounted.current && request === sequence.current) {
-        setRefreshError(textError(failure))
-        setFailure(previous => previous?.kind === 'mutation' ? previous : { kind: 'refresh', message: textError(failure) })
-      }
-      if (options.throwOnError) throw failure
-      return null
-    } finally { clearTimeout(timeout); requests.current.delete(controller); if (mounted.current && request === sequence.current) setLoading(false) }
-  }, [])
+  const client = useRef(null)
+  if (!client.current) client.current = createTaskBoardClient({
+    onSnapshot: next => {
+      setState(next)
+      setLastSuccessAt(Date.now())
+      setRefreshError('')
+      setFailure(previous => previous?.kind === 'refresh' ? null : previous)
+    },
+    onRefreshError: error => {
+      setRefreshError(textError(error))
+      setFailure(previous => previous?.kind === 'mutation' ? previous : { kind: 'refresh', message: textError(error) })
+    },
+    onLoading: setLoading,
+    onPending: setPending,
+    onMutationError: error => setFailure({ kind: 'mutation', message: textError(error) }),
+    onMutationSuccess: () => setFailure(null),
+  })
+  const refresh = useCallback(options => client.current.refresh(options), [])
+  const mutate = useCallback((url, method, payload) => client.current.mutate(url, method, payload), [])
   useEffect(() => {
-    mounted.current = true
-    refresh()
-    const wake = () => { if (document.visibilityState !== 'hidden' && requests.current.size === 0) refresh({ quiet: true }) }
-    const timer = setInterval(() => { setClock(Date.now()); wake() }, 4000)
+    client.current.start()
+    setPending(0)
+    const wake = () => {
+      if (document.visibilityState !== 'hidden') {
+        setClock(Date.now())
+        if (!client.current.busy()) void refresh({ quiet: true })
+      }
+    }
+    if (document.visibilityState !== 'hidden') void refresh()
+    const timer = setInterval(wake, 4000)
     document.addEventListener('visibilitychange', wake)
     window.addEventListener('focus', wake)
-    return () => { mounted.current = false; clearInterval(timer); document.removeEventListener('visibilitychange', wake); window.removeEventListener('focus', wake); for (const controller of requests.current) controller.abort(); requests.current.clear() }
-  }, [refresh])
-  const mutate = useCallback(async (url, method, payload) => {
-    const controller = new AbortController()
-    requests.current.add(controller)
-    const timeout = setTimeout(() => controller.abort(), 45000)
-    if (mounted.current) setPending(count => count + 1)
-    try {
-      if (!stateRef.current.csrfToken) {
-        const current = await refresh({ quiet: true, throwOnError: true })
-        if (current) stateRef.current = current
-      }
-      if (!stateRef.current.csrfToken) throw new Error('The local studio service is not ready. Refresh and try again.')
-      const response = await fetch(url, { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Office-Token': stateRef.current.csrfToken }, body: JSON.stringify(payload || {}), signal: controller.signal })
-      const result = await readResponse(response)
-      if (mounted.current) setFailure(null)
-      await refresh({ quiet: true })
-      return result
-    } catch (error) {
-      const failure = controller.signal.aborted ? new Error('The studio did not confirm the change. Refresh the board to check whether it was saved before retrying.') : error
-      if (mounted.current) setFailure({ kind: 'mutation', message: textError(failure) })
-      throw failure
-    } finally { clearTimeout(timeout); requests.current.delete(controller); if (mounted.current) setPending(count => Math.max(0, count - 1)) }
+    return () => {
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', wake)
+      window.removeEventListener('focus', wake)
+      client.current.stop()
+    }
   }, [refresh])
   const methods = useMemo(() => ({
     cardActions: (action, items) => mutate('/api/office/tasks/card-actions', 'POST', { action, items }),

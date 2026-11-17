@@ -78,3 +78,58 @@ test('compact view bounds 6000 offline agents but never truncates 100 running or
   const read = createNativeStatusReader({ baseUrl: 'http://127.0.0.1:5186', provider: 'claude', fetchImpl: async () => json(projected) });
   const actual = await read(); assert.equal(actual.agents.filter(agent => agent.status === 'working').length, 100); assert.equal(actual.omittedOfflineCount, 5980);
 });
+
+test('simultaneous native polls share one observation without caching success, failure or mutable objects', async () => {
+  let calls = 0, release, fail = false;
+  const value = { agents: [{ id: 'one', status: 'working', executionState: 'working', observed: true }], observedAt: '2026-11-17T00:00:00Z' };
+  const read = createNativeStatusReader({ baseUrl: 'http://localhost:5186', provider: 'codex', fetchImpl: async () => {
+    calls++; if (calls === 1) await new Promise(resolve => { release = resolve; });
+    if (fail) throw new Error('Private failure');
+    return json(value);
+  } });
+  const reading = Promise.all(Array.from({ length: 10 }, () => read()));
+  assert.equal(calls, 1); release();
+  const results = await reading;
+  assert.equal(results[0].observedAt, value.observedAt);
+  results[0].agents[0].status = 'offline';
+  assert.equal(results[1].agents[0].status, 'working');
+  assert.deepEqual(await read(), value); assert.equal(calls, 2);
+  fail = true;
+  const failures = await Promise.allSettled(Array.from({ length: 10 }, () => read()));
+  assert.ok(failures.every(result => result.status === 'rejected')); assert.equal(calls, 3);
+  fail = false; assert.deepEqual(await read(), value); assert.equal(calls, 4);
+});
+
+test('native deadline covers a stalled body and cancellation, then the next poll recovers', async () => {
+  let calls = 0, cancelled = false, signal;
+  // Keep the test process alive while the production deadline remains unref'd.
+  const keepAlive = setTimeout(() => {}, 1000);
+  try {
+    const read = createNativeStatusReader({ baseUrl: 'http://localhost:5186', provider: 'claude', timeoutMs: 30, fetchImpl: async (_url, options) => {
+      signal = options.signal;
+      if (++calls === 1) return new Response(new ReadableStream({ cancel() { cancelled = true; return new Promise(() => {}); } }));
+      return json({ agents: [], observedAt: '2026-11-17T00:00:01Z' });
+    } });
+    const start = performance.now();
+    await assert.rejects(read(), /Current claude status source is unavailable/);
+    assert.ok(performance.now() - start < 500); assert.equal(signal.aborted, true); assert.equal(cancelled, true);
+    assert.equal((await read()).observedAt, '2026-11-17T00:00:01Z'); assert.equal(calls, 2);
+  } finally { clearTimeout(keepAlive); }
+});
+
+test('an unresponsive fetch cannot retain the shared native poll after its deadline', async () => {
+  let calls = 0, late, cancelled = false;
+  const keepAlive = setTimeout(() => {}, 1000);
+  try {
+    const read = createNativeStatusReader({ baseUrl: 'http://localhost:5186', provider: 'codex', timeoutMs: 30, fetchImpl: async () => {
+      if (++calls === 1) return new Promise(resolve => { late = resolve; });
+      return json({ agents: [] });
+    } });
+    await assert.rejects(read(), /unavailable/);
+    assert.deepEqual(await read(), { agents: [] }); assert.equal(calls, 2);
+    late(new Response(new ReadableStream({ cancel() { cancelled = true; } })));
+    await new Promise(resolve => setImmediate(resolve)); assert.equal(cancelled, true);
+    assert.deepEqual(await read(), { agents: [] }); assert.equal(calls, 3);
+  } finally { clearTimeout(keepAlive); }
+  assert.throws(() => createNativeStatusReader({ baseUrl: 'http://localhost:5186', provider: 'codex', timeoutMs: 2001 }), /deadline/);
+});
